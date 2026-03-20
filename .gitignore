@@ -1,0 +1,5 @@
+.env
+rpve_outputs/
+rpve_uploads/
+__pycache__/
+new poc/
