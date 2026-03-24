@@ -56,6 +56,7 @@ EMPLOYEE_FIELDS = {
         "LAST_NAME",
         "COVERAGE",
         "PLAN_NAME",
+        "COVERAGE_OPTION",
         "CURRENT_PREMIUM",
     ],
 
@@ -65,6 +66,7 @@ EMPLOYEE_FIELDS = {
         "LAST_NAME",
         "COVERAGE",
         "PLAN_NAME",
+        "COVERAGE_OPTION",
         "CURRENT_PREMIUM",
     ],
 
@@ -114,7 +116,7 @@ EMPLOYEE_FIELDS = {
     ],
 }
 
-# EV_OFF Strict Requirement: All 13 fields
+# EV_OFF Strict Requirement: All 14 fields
 EV_OFF_FIELDS = [
     "DATA_ROW",
     "FIRST_NAME",
@@ -125,18 +127,20 @@ EV_OFF_FIELDS = [
     "RELATIONSHIP_TO_EMPLOYEE",
     "DEPENDENT_OF_EMPLOYEE_ROW",
     "COVERAGE",
+    "COVERAGE_OPTION",
     "COBRA_PARTICIPANT",
     "CURRENT_PLAN_ENROLLED",
     "PLAN_NAME",
     "MONTHLY_TOTAL_PREMIUM",
 ]
 
-# EV_ON Strict Requirement: 5 fields
+# EV_ON Strict Requirement: 6 fields
 EV_ON_FIELDS = [
     "FIRST_NAME",
     "LAST_NAME",
     "COVERAGE",
     "PLAN_NAME",
+    "COVERAGE_OPTION",
     "CURRENT_PREMIUM",
 ]
 
@@ -189,24 +193,26 @@ Extract a SUMMARY and EMPLOYEES array.
 
 SUMMARY: company_name, invoice_number, billing_date, due_date, reference_number, total_cost
 
-EMPLOYEES - one row per plan line per employee, PLUS a subtotal row for each employee:
+EMP_LIST = [{"first_name":"","last_name":"","coverage":"","plan_name":"","coverage_option":"","current_premium":""}]
+  employees - one row per plan line per employee, PLUS a subtotal row for each employee:
   first_name       : member first name
   last_name        : member last name
   coverage         : EXACT coverage tier/code (e.g. Employee, Family, EE+1, E, ES, ESC, EC, E1D, E2D, E3D, E4D, E5D, E6D, E7D, E8D, E9D, etc.)
-  plan_name        : insurance plan name (CRITICAL: Plan names often span across MULTIPLE physical lines. You MUST aggressively capture the entire multi-line block into one string. Do not stop at the first line!)
+  plan_name        : insurance category/type (e.g. Medical, Dental, Vision)
+  coverage_option  : specific insurance product name (e.g. UnitedHealthcare Dental PPO 50, Choice Plus HDHP 1700)
   current_premium  : dollar amount for that plan line
 
 Rules: 
 1. INDIVIDUAL PLAN LINES: Extract every plan line for an employee with its individual cost.
 2. SUBTOTAL ROW: After all plan lines for an employee, add ONE subtotal row:
-   - plan_name: (Set to exactly "TOTAL")
+   - coverage_option: (Set to exactly "TOTAL")
    - current_premium: the sub-total amount for that specific employee.
 3. Each person must be represented by their individual plan rows, followed by their "TOTAL" subtotal row.
 Use "" for missing values. Return ONLY valid JSON.
 
 {{
   "summary": {{"company_name":"","invoice_number":"","billing_date":"","due_date":"","reference_number":"","total_cost":""}},
-  "employees": [{{"first_name":"","last_name":"","coverage":"","plan_name":"","current_premium":""}}]
+  "employees": [{{"first_name":"","last_name":"","coverage":"","plan_name":"","coverage_option":"","current_premium":""}}]
 }}
 
 PDF TEXT: {text}
@@ -223,20 +229,21 @@ EMPLOYEES - one row per plan line per employee, PLUS a subtotal row for each emp
   first_name       : member first name
   last_name        : member last name
   coverage         : EXACT coverage tier/code (e.g. Employee, Family, EE+1, E, ES, ESC, EC, E1D, E2D, E3D, E4D, E5D, E6D, E7D, E8D, E9D, etc.)
-  plan_name        : insurance plan name (CRITICAL: Plan names often span across MULTIPLE physical lines. You MUST aggressively capture the entire multi-line block into one string. Do not stop at the first line!)
+  plan_name        : insurance category/type (e.g. Medical, Dental, Vision)
+  coverage_option  : specific insurance product name (e.g. UnitedHealthcare Dental PPO 50, Choice Plus HDHP 1700)
   current_premium  : dollar amount for that plan line
 
 Rules: 
 1. INDIVIDUAL PLAN LINES: Extract every plan line for an employee with its individual cost.
 2. SUBTOTAL ROW: After all plan lines for an employee, add ONE subtotal row:
-   - plan_name: (Set to exactly "TOTAL")
+   - coverage_option: (Set to exactly "TOTAL")
    - current_premium: the sub-total amount for that specific employee.
 3. Each person must be represented by their individual plan rows, followed by their "TOTAL" subtotal row.
 Use "" for missing values. Return ONLY valid JSON.
 
 {{
   "summary": {{"company_name":"","client_number":"","statement_date":"","statement_number":"","grand_total":""}},
-  "employees": [{{"first_name":"","last_name":"","coverage":"","plan_name":"","current_premium":""}}]
+  "employees": [{{"first_name":"","last_name":"","coverage":"","plan_name":"","coverage_option":"","current_premium":""}}]
 }}
 
 PDF TEXT: {text}
@@ -338,7 +345,7 @@ PDF TEXT: {text}
 # CORE FUNCTIONS
 # ══════════════════════════════════════════════════════════════════════════════
 
-def extract_text(pdf_path: Path, max_pages: int = 15) -> str:
+def extract_text(pdf_path: Path, max_pages: int = 1000) -> str:
     """
     Robustly extracts text from a PDF by iterating through pages and using 
     multiple engines (pdfplumber, fitz, and OCR) to ensure full capture.
@@ -410,7 +417,7 @@ def classify(text: str) -> str | None:
 
 
 def extract_with_llm(sub_type: str, text: str, ev_mode: bool = False) -> dict:
-    # Increased input length limit from 12k to 100k to prevent truncating large invoices
+    # Increased input length limit to 400k to fully leverage the model's 128k token context window
     
     if ev_mode:
         # EV MODE IS ON: Strictly follow the 5-field requirement.
@@ -423,27 +430,27 @@ Extract a SUMMARY and EMPLOYEES array.
 
 SUMMARY: {sum_fields}
 
-EMPLOYEES - one row per individual plan line, PLUS a subtotal row for each employee:
-1. MULTI-PLAN BLOCKS: Employees often have 3 to 10 plans listed (Medical, Dental, Vision, Life, etc.).
-2. NAME ASSOCIATION: The employee name usually only appears on the FIRST plan line of their block. You MUST associate ALL subsequent plan lines (until you hit the "Total" for that person or the next person's name) with that same employee name.
-3. EXHAUSTIVE CAPTURE: You must capture EVERY single plan line row. Do not skip any insurance package listed under an employee.
-4. ONE ROW PER PLAN: Each plan line MUST be its own object in the 'employees' list.
-5. INDIVIDUAL COSTS: For each plan line, extract the specific premium cost for that line.
-6. SUBTOTAL ROW: After all plan lines for an employee, add ONE subtotal row:
-   - plan_name: (Set to empty string "")
-   - coverage: (Set to empty string "")
-   - current_premium: the combined sub-total amount for that specific employee.
-7. Return ONLY valid JSON.
+  employees: one row per individual plan line, PLUS a subtotal row for each employee:
+  1. MULTI-PLAN BLOCKS: Employees often have 3 to 10 plans listed (Medical, Dental, Vision, Life, etc.).
+  2. NAME ASSOCIATION: The employee name usually only appears on the FIRST plan line of their block. You MUST associate ALL subsequent plan lines with that same employee name.
+  3. CATEGORY vs PRODUCT: 
+     - plan_name: insurance category (e.g. Medical, Dental, Vision)
+     - coverage_option: specific insurance product name
+  4. ONE ROW PER PLAN: Each plan line MUST be its own object in the 'employees' list.
+  5. SUBTOTAL ROW: After all plan lines for an employee, add ONE subtotal row:
+     - coverage_option: (Set to exactly "TOTAL")
+     - current_premium: the combined sub-total amount for that specific employee.
+  6. Return ONLY valid JSON.
 
-FORMAT EXAMPLE:
-{{
-  "summary": {{ "company_name": "...", "total_cost": "..." }},
-  "employees": [
-    {{"first_name": "John", "last_name": "Doe", "coverage": "EE", "plan_name": "Medical", "current_premium": "400.00"}},
-    {{"first_name": "John", "last_name": "Doe", "coverage": "EE", "plan_name": "Vision", "current_premium": "50.00"}},
-    {{"first_name": "John", "last_name": "Doe", "coverage": "", "plan_name": "", "current_premium": "450.00"}}
-  ]
-}}
+  FORMAT EXAMPLE:
+  {{
+    "summary": {{ "company_name": "...", "total_cost": "..." }},
+    "employees": [
+      {{"first_name": "John", "last_name": "Doe", "coverage": "EE", "plan_name": "Dental", "coverage_option": "UHC Dental PPO 50", "current_premium": "40.00"}},
+      {{"first_name": "John", "last_name": "Doe", "coverage": "EE", "plan_name": "Vision", "coverage_option": "VSP Vision Plan", "current_premium": "10.00"}},
+      {{"first_name": "John", "last_name": "Doe", "coverage": "", "plan_name": "", "coverage_option": "TOTAL", "current_premium": "50.00"}}
+    ]
+  }}
 
 PDF TEXT: {{text}}
 """
@@ -452,7 +459,7 @@ PDF TEXT: {{text}}
         # Even if the document is Engage/Velocity, we force the 13-field structure.
         prompt_template = f"""
 You are extracting data from a {sub_type.replace('_', ' ')} invoice.
-EV MODE IS OFF: You must extract the following 13 fields for each person:
+EV MODE IS OFF: You must extract the following 14 fields for each person:
 - Data Row (data_row)
 - First Name (first_name)
 - Last Name (last_name)
@@ -462,6 +469,7 @@ EV MODE IS OFF: You must extract the following 13 fields for each person:
 - Relationship to Employee (relationship_to_employee - EE / SP / CH)
 - Dependent of Employee Row (dependent_of_employee_row)
 - Coverage (coverage - ES / EC / FAM / NE / WP / RC / WO)
+- Coverage Option (coverage_option - specific insurance product name e.g. Dental PPO 50, Choice Plus HDHP 1700)
 - Cobra Participant (cobra_participant - Y / N)
 - Current Plan Enrolled (current_plan_enrolled)
 - Plan Name (plan_name)
@@ -469,35 +477,71 @@ EV MODE IS OFF: You must extract the following 13 fields for each person:
 
 STRICT RULES:
 1. One row per individual.
-2. If the document has multiple plan lines for one person (like Engage), squash them into one row and use the total premium.
+2. If the document has multiple plan lines for one person (like Engage), squash them into one row and use the total premium. You can comma-separate coverage_option if necessary.
 3. Return valid JSON only.
 
 {{
   "summary": {{"company_name": "", "total_amount_due": ""}},
-  "employees": [{{"data_row": null, "first_name": null, "last_name": null, "gender": null, "date_of_birth": null, "home_zip_code": null, "relationship_to_employee": null, "dependent_of_employee_row": null, "coverage": null, "cobra_participant": null, "current_plan_enrolled": null, "plan_name": null, "monthly_total_premium": null}}]
+  "employees": [{{"data_row": null, "first_name": null, "last_name": null, "gender": null, "date_of_birth": null, "home_zip_code": null, "relationship_to_employee": null, "dependent_of_employee_row": null, "coverage": null, "coverage_option": null, "cobra_participant": null, "current_plan_enrolled": null, "plan_name": null, "monthly_total_premium": null}}]
 }}
 
 PDF TEXT: {{text}}
 """
 
-    prompt = prompt_template.replace("{text}", text[:100000])
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": "You are a precise insurance billing data extraction assistant. Return valid JSON only. No markdown. No extra text."},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0,
-        response_format={"type": "json_object"},
-    )
-    raw = response.choices[0].message.content
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        return json.loads(re.sub(r"```json|```", "", raw).strip())
+    lines = text.split('\n')
+    chunks = []
+    current_chunk = []
+    current_len = 0
+    # Chunk by ~40,000 chars to avoid hitting the 16k output tokens max limit and timeouts
+    for line in lines:
+        if current_len + len(line) > 40000 and current_chunk:
+            chunks.append('\n'.join(current_chunk))
+            current_chunk = []
+            current_len = 0
+        current_chunk.append(line)
+        current_len += len(line) + 1
+    if current_chunk:
+        chunks.append('\n'.join(current_chunk))
+
+    all_employees = []
+    final_summary = {}
+
+    print(f"[RPVE] LLM extraction split into {len(chunks)} chunks...")
+    for i, chunk in enumerate(chunks):
+        prompt = prompt_template.replace("{text}", chunk)
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are a precise insurance billing data extraction assistant. Return valid JSON only. No markdown. No extra text."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0,
+                response_format={"type": "json_object"},
+            )
+            raw = response.choices[0].message.content
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                data = json.loads(re.sub(r"```json|```", "", raw).strip())
+                
+            if not final_summary and data.get("summary"):
+                # Always grab summary from the first successful chunk
+                final_summary = data.get("summary")
+                
+            emps = data.get("employees", [])
+            all_employees.extend(emps)
+            print(f"  [RPVE] Chunk {i+1}/{len(chunks)} processed -> found {len(emps)} employees")
+        except Exception as e:
+            print(f"  [RPVE] Chunk {i+1}/{len(chunks)} failed: {e}")
+
+    return {
+        "summary": final_summary,
+        "employees": all_employees
+    }
 
 
-def build_excel(data: dict, sub_type: str, stem: str) -> Path:
+def build_excel(data: dict, sub_type: str, stem: str, active_employee_fields: list[str] | None = None) -> Path:
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
@@ -521,7 +565,8 @@ def build_excel(data: dict, sub_type: str, stem: str) -> Path:
     we.title = "Employee Details"
     we.sheet_view.showGridLines = False
 
-    all_cols = EMPLOYEE_FIELDS.get(sub_type, [])
+    # Use passed fields or fallback to global mapping
+    all_cols = active_employee_fields if active_employee_fields is not None else EMPLOYEE_FIELDS.get(sub_type, [])
 
     we.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max(len(all_cols),1))
     t2 = we.cell(row=1, column=1, value=f"Employee Details - {len(employees)} records")
@@ -558,11 +603,11 @@ def build_excel(data: dict, sub_type: str, stem: str) -> Path:
             if col in fin_cols:
                 total = 0.0
                 for emp in employees:
-                    # Skip subtotal rows ("TOTAL" or empty plan_name) for engage and velocity to avoid double counting
-                    p_val = emp.get("plan_name", "")
-                    pname = str(p_val if p_val is not None else "").strip().upper()
+                    # Skip subtotal rows ("TOTAL" or empty plan_name) to avoid double counting
+                    p_opt = emp.get("coverage_option", "")
+                    pname = str(p_opt if p_opt is not None else "").strip().upper()
                     
-                    if sub_type in ["engage", "velocity"] and (not pname or pname == "TOTAL" or pname == "NONE"):
+                    if pname == "TOTAL" or (sub_type in ["engage", "velocity"] and (not pname or pname == "NONE")):
                         continue
                     
                     val_str = str(emp.get(col.lower(), "")).replace("$", "").replace(",", "")
@@ -609,10 +654,10 @@ def build_excel(data: dict, sub_type: str, stem: str) -> Path:
     return xlsx_path
 
 
-def build_json_file(data: dict, sub_type: str, stem: str) -> Path:
+def build_json_file(data: dict, sub_type: str, stem: str, active_employee_fields: list[str] | None = None) -> Path:
     summary   = data.get("summary", {})
     employees = data.get("employees", [])
-    required  = EMPLOYEE_FIELDS.get(sub_type, [])
+    required  = active_employee_fields if active_employee_fields is not None else EMPLOYEE_FIELDS.get(sub_type, [])
 
     rows = []
     for emp in employees:
@@ -716,22 +761,19 @@ async def extract(file: UploadFile = File(...), ev_mode: str = Form("false")):
 
     stem      = Path(safe).stem
     
-    # Determine the actual fields used for this extraction strictly by mode
-    if ev_bool:
-        active_fields = EV_ON_FIELDS
-    else:
-        active_fields = EV_OFF_FIELDS
+    try:
+        # Determine the actual fields used for this extraction strictly by mode
+        if ev_bool:
+            active_fields = EV_ON_FIELDS
+        else:
+            active_fields = EV_OFF_FIELDS
 
-    # Temporarily override EMPLOYEE_FIELDS for Excel/JSON building
-    original_fields = EMPLOYEE_FIELDS.copy()
-    EMPLOYEE_FIELDS[sub_type] = active_fields
-
-    xlsx_path = build_excel(data, sub_type, stem)
-    json_path = build_json_file(data, sub_type, stem)
-    
-    # Restore EMPLOYEE_FIELDS
-    EMPLOYEE_FIELDS.clear()
-    EMPLOYEE_FIELDS.update(original_fields)
+        xlsx_path = build_excel(data, sub_type, stem, active_employee_fields=active_fields)
+        json_path = build_json_file(data, sub_type, stem, active_employee_fields=active_fields)
+    except Exception as build_err:
+        import traceback
+        print(f"[RPVE] Output building error:\n{traceback.format_exc()}")
+        raise HTTPException(500, f"Failed to generate output files: {str(build_err)}")
 
     _cache[xlsx_path.name] = str(xlsx_path)
     _cache[json_path.name] = str(json_path)
