@@ -528,6 +528,10 @@ Extract ONLY the exact, valid ADP plan name.
 Do NOT extract random text near plan sections, headers, footers, or unrelated labels.
 ✅ Plan name must belong to a defined benefits section, be consistent across employee entries, and appear as a clear plan title.
 
+🔹 DO NOT ABBREVIATE OR TRUNCATE PLAN NAMES (CRITICAL):
+The plan name and coverage option MUST match the FULL string found in the "Plan" column of the PDF.
+For example, if the text says "ANTHMO BC-Select HMO 1500-SCA", do NOT shorten it to "ANTHMO BC-Select HMO" or "ANTHMO BC-Select HMO 15". Capture the ENTIRE sequence including numbers and suffixes (e.g., -SCA, $2000, etc.).
+
 🔹 OUTPUT FIELDS (14 fields per person)
 - data_row: sequential row number
 - first_name
@@ -538,9 +542,9 @@ Do NOT extract random text near plan sections, headers, footers, or unrelated la
 - relationship_to_employee (EE / SP / CH)
 - dependent_of_employee_row
 - coverage (ES / EC / FAM / EE / SP / CH — use relationship if coverage tier not listed)
-- coverage_option (specific insurance product name)
+- coverage_option (FULL insurance product name — do NOT truncate)
 - cobra_participant (Y / N)
-- current_plan_enrolled (plan/product description)
+- current_plan_enrolled (FULL plan/product description — do NOT truncate)
 - plan_name (insurance category: Medical, Dental, Vision, etc.)
 - monthly_total_premium: The individual plan line cost for that specific plan row. Do NOT use the employee's "Total" or "Subtotal" row — extract each plan line as its own row with its own cost.
 
@@ -582,7 +586,7 @@ PDF TEXT: {{text}}
         prompt = prompt_template.replace("{text}", chunk)
         try:
             response = client.chat.completions.create(
-                model="gpt-4o-mini",
+                model="gpt-4o",
                 messages=[
                     {"role": "system", "content": "You are a precise insurance billing data extraction assistant. Return valid JSON only. No markdown. No extra text."},
                     {"role": "user", "content": prompt},
