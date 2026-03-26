@@ -1,0 +1,350 @@
+{
+  "ADP invoice.pdf": {
+    "sub_type": "engage",
+    "summary": {
+      "company_name": "HIRSCH GLASS CORP",
+      "total_amount_due": "$21,350.31"
+    },
+    "employee_count": 49,
+    "employees": [
+      {
+        "data_row": 1,
+        "first_name": "Mishonda",
+        "last_name": "Mackey",
+        "gender": null,
+        "date_of_birth": null,
+        "home_zip_code": null,
+        "relationship_to_employee": "EE",
+        "dependent_of_employee_row": null,
+        "coverage": "NE",
+        "coverage_option": "METLDI LIF Basic $10,000",
+        "cobra_participant": "N",
+        "current_plan_enrolled": "CURRENT",
+        "plan_name": "METLDI LIF",
+        "monthly_total_premium": "3.48"
+      },
+      {
+        "data_row": 2,
+        "first_name": "Kieona",
+        "last_name": "Cook",
+        "gender": null,
+        "date_of_birth": null,
+        "home_zip_code": null,
+        "relationship_to_employee": "EE",
+        "dependent_of_employee_row": null,
+        "coverage": "NE",
+        "coverage_option": "METLDI LIF Basic $10,000",
+        "cobra_participant": "N",
+        "current_plan_enrolled": "CURRENT",
+        "plan_name": "METLDI LIF",
+        "monthly_total_premium": "3.48"
+      },
+      {
+        "data_row": 3,
+        "first_name": "Monica",
+        "last_name": "Xie",
+        "gender": null,
+        "date_of_birth": null,
+        "home_zip_code": null,
+        "relationship_to_employee": "EE",
+        "dependent_of_employee_row": null,
+        "coverage": "NE",
+        "coverage_option": "OXFORD OXF-MET EPO 18B 2000-NNJ Employee",
+        "cobra_participant": "N",
+        "current_plan_enrolled": "CURRENT",
+        "plan_name": "OXFORD",
+        "monthly_total_premium": "758.04"
+      }
+    ]
+  },
+  "Alexton Benefits Invoice as of 03.24.26.pdf": {
+    "sub_type": "engage",
+    "summary": {
+      "company_name": "Alexton Incorporated",
+      "total_amount_due": "$21,351.55"
+    },
+    "employee_count": 54,
+    "employees": [
+      {
+        "data_row": 1,
+        "first_name": "Gwendolyn",
+        "last_name": "Moten",
+        "gender": null,
+        "date_of_birth": null,
+        "home_zip_code": null,
+        "relationship_to_employee": "EE",
+        "dependent_of_employee_row": null,
+        "coverage": "ES",
+        "coverage_option": "UHC-ChPr-EC7T-3000-80-VA-FL",
+        "cobra_participant": "N",
+        "current_plan_enrolled": "CURRENT",
+        "plan_name": "AETDEN AET-APPO DEN 1,500-Area 6A",
+        "monthly_total_premium": 566.42
+      },
+      {
+        "data_row": 2,
+        "first_name": "Angela",
+        "last_name": "Greene",
+        "gender": null,
+        "date_of_birth": null,
+        "home_zip_code": null,
+        "relationship_to_employee": "EE",
+        "dependent_of_employee_row": null,
+        "coverage": "ES",
+        "coverage_option": "UHC-ChPr-EC7T-3000-80-VA-FL",
+        "cobra_participant": "N",
+        "current_plan_enrolled": "CURRENT",
+        "plan_name": "AETDEN AET-APPO DEN 1,500-Area 6A",
+        "monthly_total_premium": 568.34
+      },
+      {
+        "data_row": 3,
+        "first_name": "Sheliese",
+        "last_name": "Hall",
+        "gender": null,
+        "date_of_birth": null,
+        "home_zip_code": null,
+        "relationship_to_employee": "EE",
+        "dependent_of_employee_row": null,
+        "coverage": "ES",
+        "coverage_option": "UHC-ChEPO-EC7E-2500-80-VA-FL",
+        "cobra_participant": "N",
+        "current_plan_enrolled": "CURRENT",
+        "plan_name": "AETDEN AET-APPO DEN 1,500-Area 6A",
+        "monthly_total_premium": 635.66
+      }
+    ]
+  },
+  "Benefits invoice.pdf": {
+    "sub_type": "engage",
+    "summary": {
+      "company_name": "Arredondo Co LLC",
+      "total_amount_due": "$64,978.85"
+    },
+    "employee_count": 15,
+    "employees": [
+      {
+        "data_row": 1,
+        "first_name": "Yessenia",
+        "last_name": "Martinez",
+        "gender": null,
+        "date_of_birth": null,
+        "home_zip_code": null,
+        "relationship_to_employee": "EE",
+        "dependent_of_employee_row": null,
+        "coverage": "FAM",
+        "coverage_option": "GUARDI Guardian-Value 1000 Area 5G",
+        "cobra_participant": "N",
+        "current_plan_enrolled": "CURRENT",
+        "plan_name": "METLDI LIF Basic $10,000",
+        "monthly_total_premium": "2,342.65"
+      },
+      {
+        "data_row": 2,
+        "first_name": "Gjylimsere",
+        "last_name": "Asllani",
+        "gender": null,
+        "date_of_birth": null,
+        "home_zip_code": null,
+        "relationship_to_employee": "EE",
+        "dependent_of_employee_row": null,
+        "coverage": "FAM",
+        "coverage_option": "GUARDI Guardian-Value 1000 Area 5G",
+        "cobra_participant": "N",
+        "current_plan_enrolled": "CURRENT",
+        "plan_name": "METLDI LIF Basic $10,000",
+        "monthly_total_premium": "3,245.19"
+      },
+      {
+        "data_row": 3,
+        "first_name": "Melissa",
+        "last_name": "Symeon",
+        "gender": null,
+        "date_of_birth": null,
+        "home_zip_code": null,
+        "relationship_to_employee": "EE",
+        "dependent_of_employee_row": null,
+        "coverage": "WP",
+        "coverage_option": "GUARDI Guardian-Value 1000 Area 5G",
+        "cobra_participant": "N",
+        "current_plan_enrolled": "CURRENT",
+        "plan_name": "METLDI LIF Basic $10,000",
+        "monthly_total_premium": "2,420.72"
+      }
+    ]
+  },
+  "BLVD_ADP(5666.25)_3-10-26.pdf": {
+    "sub_type": "engage",
+    "summary": {
+      "company_name": "BLVD Capital LLC",
+      "total_amount_due": "$5,666.25"
+    },
+    "employee_count": 7,
+    "employees": [
+      {
+        "data_row": 1,
+        "first_name": "Jake",
+        "last_name": "Walker",
+        "gender": null,
+        "date_of_birth": null,
+        "home_zip_code": null,
+        "relationship_to_employee": "EE",
+        "dependent_of_employee_row": null,
+        "coverage": "EC",
+        "coverage_option": "ANTPPO BC-HSA 5000-SCA",
+        "cobra_participant": "N",
+        "current_plan_enrolled": "CURRENT",
+        "plan_name": "METLDI LIF Basic $10,000",
+        "monthly_total_premium": 533.93
+      },
+      {
+        "data_row": 2,
+        "first_name": "Joshua",
+        "last_name": "Lettiere",
+        "gender": null,
+        "date_of_birth": null,
+        "home_zip_code": null,
+        "relationship_to_employee": "EE",
+        "dependent_of_employee_row": null,
+        "coverage": "EC",
+        "coverage_option": "ANTPPO BC-PPO 2000-70 -SCA",
+        "cobra_participant": "N",
+        "current_plan_enrolled": "CURRENT",
+        "plan_name": "METLDI LIF Basic $10,000",
+        "monthly_total_premium": 724.34
+      },
+      {
+        "data_row": 3,
+        "first_name": "William",
+        "last_name": "Madden Smith",
+        "gender": null,
+        "date_of_birth": null,
+        "home_zip_code": null,
+        "relationship_to_employee": "EE",
+        "dependent_of_employee_row": null,
+        "coverage": "EC",
+        "coverage_option": "ANTPPO BC-HSA 5000-SCA",
+        "cobra_participant": "N",
+        "current_plan_enrolled": "CURRENT",
+        "plan_name": "METLDI LIF Basic $10,000",
+        "monthly_total_premium": 481.61
+      }
+    ]
+  },
+  "invoice_pdf_20260316171053545-17319_8782216.pdf": {
+    "sub_type": "engage",
+    "summary": {
+      "company_name": "First San Francisco Partners Inc.",
+      "total_amount_due": "$14,268.91"
+    },
+    "employee_count": 10,
+    "employees": [
+      {
+        "data_row": 1,
+        "first_name": "Gretchen",
+        "last_name": "Burnham",
+        "gender": null,
+        "date_of_birth": null,
+        "home_zip_code": null,
+        "relationship_to_employee": "EE",
+        "dependent_of_employee_row": null,
+        "coverage": "NE",
+        "coverage_option": "METLDI LIF Basic $50,000",
+        "cobra_participant": "N",
+        "current_plan_enrolled": "CURRENT",
+        "plan_name": "METLDI LIF",
+        "monthly_total_premium": "6.00"
+      },
+      {
+        "data_row": 2,
+        "first_name": "Stephanie",
+        "last_name": "Paradis",
+        "gender": null,
+        "date_of_birth": null,
+        "home_zip_code": null,
+        "relationship_to_employee": "EE",
+        "dependent_of_employee_row": null,
+        "coverage": "NE",
+        "coverage_option": "DELTA Delta Dental-PPO 1650 Area 2D Employee",
+        "cobra_participant": "N",
+        "current_plan_enrolled": "CURRENT",
+        "plan_name": "DELTA",
+        "monthly_total_premium": "57.30"
+      },
+      {
+        "data_row": 3,
+        "first_name": "Angie",
+        "last_name": "Pribor",
+        "gender": null,
+        "date_of_birth": null,
+        "home_zip_code": null,
+        "relationship_to_employee": "EE",
+        "dependent_of_employee_row": null,
+        "coverage": "NE",
+        "coverage_option": "UHC07 UHC-SPHSA-EC8L-5000-70-NoCA-Employee",
+        "cobra_participant": "N",
+        "current_plan_enrolled": "CURRENT",
+        "plan_name": "UHC07",
+        "monthly_total_premium": "595.91"
+      }
+    ]
+  },
+  "Medical Invoice.pdf": {
+    "sub_type": "engage",
+    "summary": {
+      "company_name": "Sharma Strategy Consulting LLC",
+      "total_amount_due": "$22,893.93"
+    },
+    "employee_count": 18,
+    "employees": [
+      {
+        "data_row": 1,
+        "first_name": "Aaron",
+        "last_name": "Zarenczanski",
+        "gender": null,
+        "date_of_birth": null,
+        "home_zip_code": null,
+        "relationship_to_employee": "EE",
+        "dependent_of_employee_row": null,
+        "coverage": "ES",
+        "coverage_option": "AET-P PPO DEN 5,000-Area 8A",
+        "cobra_participant": "N",
+        "current_plan_enrolled": "CURRENT",
+        "plan_name": "METLDI LIF Basic 1X ABE",
+        "monthly_total_premium": 694.25
+      },
+      {
+        "data_row": 2,
+        "first_name": "Scott",
+        "last_name": "Strang",
+        "gender": null,
+        "date_of_birth": null,
+        "home_zip_code": null,
+        "relationship_to_employee": "EE",
+        "dependent_of_employee_row": null,
+        "coverage": "FAM",
+        "coverage_option": "AET-P PPO DEN 5,000-Area 8A",
+        "cobra_participant": "N",
+        "current_plan_enrolled": "CURRENT",
+        "plan_name": "UHC07",
+        "monthly_total_premium": 2053.95
+      },
+      {
+        "data_row": 3,
+        "first_name": "Tanya",
+        "last_name": "Thomas",
+        "gender": null,
+        "date_of_birth": null,
+        "home_zip_code": null,
+        "relationship_to_employee": "EE",
+        "dependent_of_employee_row": null,
+        "coverage": "FAM",
+        "coverage_option": "AET-P PPO DEN 5,000-Area 8A",
+        "cobra_participant": "N",
+        "current_plan_enrolled": "CURRENT",
+        "plan_name": "UHC07",
+        "monthly_total_premium": 2056.11
+      }
+    ]
+  }
+}

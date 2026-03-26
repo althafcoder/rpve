@@ -120,6 +120,8 @@ Example: {{"category": "velocity"}}
             messages=[{"role": "user", "content": prompt}]
         )
         content = response.choices[0].message.content.strip()
+        print(f"[IDENTIFY] AI Raw Output: {content}")
+        
         if content.startswith("```json"):
             content = content[7:-3].strip()
         elif content.startswith("```"):
@@ -130,6 +132,8 @@ Example: {{"category": "velocity"}}
         
         if category in ["engage", "velocity", "prestige", "resourcing_kaiser", "resourcing_uhc"]:
             return category
+        else:
+            print(f"[IDENTIFY] Invalid category returned: {category}")
             
     except Exception as e:
         print(f"[IDENTIFY] AI Classification failed: {e}")

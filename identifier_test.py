@@ -63,7 +63,7 @@ def run_tests():
                 # 3. LLM Field Extraction
                 print(f"  -> Step 3: Sending to AI for JSON Extraction...")
                 start_time = time.time()
-                json_result = extract_with_llm(text, detected_category)
+                json_result = extract_with_llm(detected_category, text)
                 elapsed = time.time() - start_time
                 print(f"  -> Step 4: Received JSON in {elapsed:.1f}s. Validating Schema Match...")
 

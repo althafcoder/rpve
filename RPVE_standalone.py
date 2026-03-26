@@ -355,7 +355,11 @@ def extract_text(pdf_path: Path, max_pages: int = 1000) -> str:
     print(f"[RPVE] Extracting text from {pdf_path.name}...")
 
     # Keywords we EXPECT to find in a valid RPVE document page
-    VALID_KEYWORDS = ["TOTALSOURCE", "PAYCHEX", "AETNA", "KAISER", "UNITEDHEALTHCARE", "INVOICE", "BILLING", "PREMIUM", "AMOUNT DUE", "PAGE", "EMPLOYEE", "MEMBERS"]
+    VALID_KEYWORDS = [
+        "TOTALSOURCE", "PAYCHEX", "AETNA", "KAISER", "UNITEDHEALTHCARE", "INVOICE", "BILLING", 
+        "PREMIUM", "AMOUNT DUE", "PAGE", "EMPLOYEE", "MEMBERS", "CURRENT DETAIL", 
+        "RETRO DETAIL", "ADJUSTMENT DETAIL", "MEDICA", "ADP", "BLUE CROSS", "CIGNA", "GUARDIAN"
+    ]
 
     try:
         import pdfplumber
@@ -373,13 +377,12 @@ def extract_text(pdf_path: Path, max_pages: int = 1000) -> str:
                     try:
                         plumber_page = pdf.pages[i]
                         p_text = plumber_page.extract_text(layout=True) or ""
-                        # Validate that it's not reversed or garbage by checking keywords
                         if len(p_text.strip()) > 100 and any(kw in p_text.upper() for kw in VALID_KEYWORDS):
                             page_text = p_text
                     except Exception as e:
                         print(f"  [PAGE {i+1}] pdfplumber error: {e}")
 
-                    # 2. Fallback to fitz (PyMuPDF) if pdfplumber is empty, sparse, or fails keywords
+                    # 2. Fallback to fitz (PyMuPDF) if pdfplumber is empty or fails keywords
                     if not page_text.strip():
                         try:
                             fitz_page = doc[i]
@@ -389,15 +392,45 @@ def extract_text(pdf_path: Path, max_pages: int = 1000) -> str:
                         except Exception as e:
                             print(f"  [PAGE {i+1}] fitz failed: {e}")
 
-                    # 3. Last Resort: Per-page High-Accuracy OCR (handles scanned/rotated/reversed text)
+                    # 3. Last Resort: Robust High-Accuracy OCR (handles scanned/rotated text)
                     if not page_text.strip():
-                        print(f"  [PAGE {i+1}] No valid text layer detected (possibly scanned or reversed mapping). Running OCR...")
+                        print(f"  [PAGE {i+1}] Running Robust OCR Fallback...")
                         try:
-                            # Render page at 2x zoom (144 dpi) for high accuracy OCR
-                            pix = doc[i].get_pixmap(matrix=fitz.Matrix(2, 2))
+                            # Render at 3x zoom (216 dpi) for high accuracy
+                            pix = doc[i].get_pixmap(matrix=fitz.Matrix(3, 3))
                             img = Image.frombytes('RGB', [pix.width, pix.height], pix.samples)
-                            # Use PSM 6 to assume a single uniform block of text
+                            
+                            # A. Try Standard OSD detection first
+                            try:
+                                osd = pytesseract.image_to_osd(img)
+                                rotation = re.search(r'Rotate: (\d+)', osd)
+                                if rotation:
+                                    angle = int(rotation.group(1))
+                                    if angle != 0:
+                                        print(f"    [OSD] Correcting {angle}° rotation...")
+                                        img = img.rotate(-angle, expand=True)
+                            except:
+                                pass
+
+                            # B. Try OCR at current orientation
                             page_text = pytesseract.image_to_string(img, config='--psm 6')
+
+                            # C. Brute-Force Rotation Fallback (if keywords missing)
+                            if not any(kw in page_text.upper() for kw in VALID_KEYWORDS):
+                                print(f"    [PAGE {i+1}] Keywords not found. Retrying 90/180/270 degree rotations...")
+                                ori_img = img.copy()
+                                for rot in [90, 180, 270]:
+                                    img_rot = ori_img.rotate(rot, expand=True)
+                                    test_text = pytesseract.image_to_string(img_rot, config='--psm 6')
+                                    if any(kw in test_text.upper() for kw in VALID_KEYWORDS):
+                                        page_text = test_text
+                                        print(f"    [PAGE {i+1}] Success at {rot}° rotation.")
+                                        break
+                            
+                            # D. Final check: if still empty, use psm 3 (standard)
+                            if not page_text.strip():
+                                page_text = pytesseract.image_to_string(img, config='--psm 3')
+
                         except Exception as e:
                             print(f"  [PAGE {i+1}] OCR failed: {e}")
 
@@ -416,69 +449,110 @@ def classify(text: str) -> str | None:
     return None
 
 
-def extract_with_llm(sub_type: str, text: str, ev_mode: bool = False) -> dict:
-    # Increased input length limit to 400k to fully leverage the model's 128k token context window
-    
+def extract_with_llm(text: str, ev_mode: bool = False) -> dict:
+    # Classification-free extraction: EV Mode alone drives the extraction rules.
+
     if ev_mode:
-        # EV MODE IS ON: Strictly follow the 5-field requirement.
-        # This applies regardless of the sub_type (Engage, Velocity, etc.)
-        sum_fields = ", ".join(SUMMARY_FIELDS.get(sub_type, ["company_name", "total_amount_due"]))
-        prompt_template = f"""
-You are extracting data from a {sub_type.replace('_', ' ')} invoice.
+        # EV MODE IS ON: Extract individual plan rows + subtotals per employee.
+        prompt_template = """
+You are extracting data from a group insurance invoice.
 
 Extract a SUMMARY and EMPLOYEES array.
 
-SUMMARY: {sum_fields}
+SUMMARY fields: company_name, invoice_number, billing_period, total_amount_due
 
-  employees: one row per individual plan line, PLUS a subtotal row for each employee:
-  1. MULTI-PLAN BLOCKS: Employees often have 3 to 10 plans listed (Medical, Dental, Vision, Life, etc.).
-  2. NAME ASSOCIATION: The employee name usually only appears on the FIRST plan line of their block. You MUST associate ALL subsequent plan lines with that same employee name.
-  3. CATEGORY vs PRODUCT: 
-     - plan_name: insurance category (e.g. Medical, Dental, Vision)
-     - coverage_option: specific insurance product name
-  4. ONE ROW PER PLAN: Each plan line MUST be its own object in the 'employees' list.
-  5. SUBTOTAL ROW: After all plan lines for an employee, add ONE subtotal row:
-     - coverage_option: (Set to exactly "TOTAL")
-     - current_premium: the combined sub-total amount for that specific employee.
-  6. Return ONLY valid JSON.
+🔹 EMPLOYEE EXTRACTION RULES:
 
-  FORMAT EXAMPLE:
-  {{
-    "summary": {{ "company_name": "...", "total_cost": "..." }},
-    "employees": [
-      {{"first_name": "John", "last_name": "Doe", "coverage": "EE", "plan_name": "Dental", "coverage_option": "UHC Dental PPO 50", "current_premium": "40.00"}},
-      {{"first_name": "John", "last_name": "Doe", "coverage": "EE", "plan_name": "Vision", "coverage_option": "VSP Vision Plan", "current_premium": "10.00"}},
-      {{"first_name": "John", "last_name": "Doe", "coverage": "", "plan_name": "", "coverage_option": "TOTAL", "current_premium": "50.00"}}
-    ]
-  }}
+This invoice may use ONE of two layouts:
+
+Layout A — MULTI-PLAN BLOCK: One employee has multiple plan rows (Medical, Dental, Vision, etc.)
+  - Extract ONE row per plan line per employee.
+  - After all plan rows for an employee, add a SUBTOTAL row: coverage_option = "TOTAL", current_premium = combined total.
+
+Layout B — MEMBER ROSTER: Each row is a DIFFERENT person (Subscriber, Dependent, Spouse).
+  - Extract EVERY row as a separate record — do NOT collapse them.
+  - Do NOT create TOTAL rows for individual members in this layout.
+  - Capture: first_name, last_name, coverage (Subscriber→EE, Spouse→SP, Dependent→CH), plan_name (plan description), current_premium (charge amount).
+
+🔹 NEGATIVE VALUES (CRITICAL):
+  - If a premium, charge, or adjustment is negative (e.g. $-927.66 or -$927.66), you MUST include the minus sign in the output.
+  - Do NOT ignore or drop the minus sign.
+
+🔹 CRITICAL - CAPTURE ALL SECTIONS:
+  - Process ALL detail sections: CURRENT DETAIL, RETRO DETAIL, ADJUSTMENT DETAIL, etc.
+  - Do NOT skip rows because they appear in a RETRO or ADJUSTMENT section.
+  - Every person listed in any section must appear as a record.
+
+🔹 RELATIONSHIP MAPPING:
+  - Subscriber → EE
+  - Spouse     → SP
+  - Dependent  → CH
+
+Return ONLY valid JSON.
+
+{{
+  "summary": {{"company_name": "", "invoice_number": "", "billing_period": "", "total_amount_due": ""}},
+  "employees": [{{"first_name": "", "last_name": "", "coverage": "", "plan_name": "", "coverage_option": "", "current_premium": ""}}]
+}}
 
 PDF TEXT: {{text}}
 """
     else:
         # EV MODE IS OFF: Strictly follow the 13-field requirement (Resourcing/Prestige).
         # Even if the document is Engage/Velocity, we force the 13-field structure.
-        prompt_template = f"""
-You are extracting data from a {sub_type.replace('_', ' ')} invoice.
-EV MODE IS OFF: You must extract the following 14 fields for each person:
-- Data Row (data_row)
-- First Name (first_name)
-- Last Name (last_name)
-- Gender (gender - M / F)
-- Date of Birth (date_of_birth)
-- Home Zip Code (home_zip_code)
-- Relationship to Employee (relationship_to_employee - EE / SP / CH)
-- Dependent of Employee Row (dependent_of_employee_row)
-- Coverage (coverage - ES / EC / FAM / NE / WP / RC / WO)
-- Coverage Option (coverage_option - specific insurance product name e.g. Dental PPO 50, Choice Plus HDHP 1700)
-- Cobra Participant (cobra_participant - Y / N)
-- Current Plan Enrolled (current_plan_enrolled)
-- Plan Name (plan_name)
-- Monthly Total Premium (monthly_total_premium - only employee total, NOT dependents)
+        prompt_template = """
+You are a data extraction engine operating in EV OFF mode, processing a group insurance invoice.
 
-STRICT RULES:
-1. One row per individual.
-2. If the document has multiple plan lines for one person (like Engage), squash them into one row and use the total premium. You can comma-separate coverage_option if necessary.
-3. Return valid JSON only.
+🔹 CAPTURE ALL MEMBERS & ADJUSTMENTS (CRITICAL)
+This invoice may list members in a ROSTER format where each row is a separate individual (Subscriber, Spouse, Dependent).
+You MUST extract EVERY person listed in ANY section:
+  - CURRENT DETAIL section
+  - RETRO DETAIL section
+  - ADJUSTMENT DETAIL section
+  - Any other detail section in the document
+
+🔹 NEGATIVE VALUES (CRITICAL):
+  - If a value is negative (e.g. $-100.00), you MUST preserve the minus sign in the monthly_total_premium field.
+
+🔹 RELATIONSHIP MAPPING
+  Subscriber → EE
+  Spouse     → SP
+  Dependent  → CH
+
+🔹 ADP FORMAT SPECIFIC RULES (APPLY ONLY TO ADP FILES)
+If the document is identified as an ADP invoice (e.g. ADP TotalSource format used under Resourcing), you MUST apply these strict rules. If it is NOT an ADP file, ignore these specific constraints:
+
+1. Plan Name Extraction (CRITICAL for ADP):
+Extract ONLY the exact, valid ADP plan name.
+Do NOT extract random text near plan sections, headers, footers, or unrelated labels.
+✅ Plan name must belong to a defined benefits section, be consistent across employee entries, and appear as a clear plan title.
+❌ Avoid: Partial names, misaligned OCR text, duplicate or noisy values.
+If plan name is unclear: Skip extraction instead of guessing.
+
+2. Subtotal Filtering Rule (CRITICAL for ADP):
+Extract only employee records where the Subtotal Amount > 250 USD.
+Ignore records ≤ 250 USD or empty/invalid subtotal values.
+
+🔹 OUTPUT FIELDS (14 fields per person)
+- data_row: sequential row number
+- first_name
+- last_name
+- gender (M / F — infer if not present)
+- date_of_birth
+- home_zip_code
+- relationship_to_employee (EE / SP / CH)
+- dependent_of_employee_row
+- coverage (ES / EC / FAM / EE / SP / CH — use relationship if coverage tier not listed)
+- coverage_option (specific insurance product name)
+- cobra_participant (Y / N)
+- current_plan_enrolled (plan/product description)
+- plan_name (insurance category: Medical, Dental, Vision, etc.)
+- monthly_total_premium: The individual plan line cost for that specific plan row. Do NOT use the employee's "Total" or "Subtotal" row — extract each plan line as its own row with its own cost.
+
+🔹 KEY RULES
+- One row per individual member.
+- Accuracy > Completeness. Return valid JSON only.
+- Do not hallucinate plan names.
 
 {{
   "summary": {{"company_name": "", "total_amount_due": ""}},
@@ -620,31 +694,6 @@ def build_excel(data: dict, sub_type: str, stem: str, active_employee_fields: li
                 c.value = f"${total:,.2f}"
                 c.font  = tf
 
-    # ── Sheet 2: Summary ──────────────────────────────────────────────
-    if summary:
-        ws = wb.create_sheet(title="Summary")
-        ws.sheet_view.showGridLines = False
-        sum_cols = SUMMARY_FIELDS.get(sub_type, list(summary.keys()))
-        
-        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max(len(sum_cols),1))
-        tc = ws.cell(row=1, column=1, value=f"RPVE - {SUB_TYPE_LABELS.get(sub_type, sub_type.upper())}")
-        tc.font  = Font(bold=True, size=13, color="FFFFFF", name="Calibri")
-        tc.fill  = PatternFill("solid", fgColor=hex_col)
-        tc.alignment = Alignment(horizontal="center", vertical="center")
-        ws.row_dimensions[1].height = 28
-
-        for ci, col in enumerate(sum_cols, 1):
-            c = ws.cell(row=2, column=ci, value=col.replace("_", " "))
-            c.fill, c.font, c.alignment, c.border = hdr_fill, hdr_font, hdr_align, bdr
-            ws.column_dimensions[get_column_letter(ci)].width = 24
-        ws.row_dimensions[2].height = 22
-
-        for ci, col in enumerate(sum_cols, 1):
-            c = ws.cell(row=3, column=ci, value=summary.get(col.lower(), ""))
-            c.border, c.alignment = bdr, da
-            
-        ws.freeze_panes = "A3"
-
     we.freeze_panes = "A3"
     wb.active = we
 
@@ -729,7 +778,7 @@ async def extract(file: UploadFile = File(...), ev_mode: str = Form("false")):
     print(f"\n[RPVE] Received -> {safe}")
 
     try:
-        from identification import universal_extract_text, ai_classify
+        from identification import universal_extract_text
         text = universal_extract_text(file_path)
         
         # Consistent Text Output: Save the extracted text for ALL file types
@@ -745,14 +794,12 @@ async def extract(file: UploadFile = File(...), ev_mode: str = Form("false")):
     if not text.strip():
         raise HTTPException(422, "No text extracted. File may be empty or an unreadable image.")
 
-    sub_type = ai_classify(text, ev_mode=ev_bool)
-    if sub_type is None:
-        raise HTTPException(422, "AI Identification Failed: Document does not match any valid RPVE category.")
-
-    print(f"[RPVE] AI Classified -> {sub_type}")
+    # No AI classification — EV Mode drives everything.
+    sub_type = "ev_on" if ev_bool else "ev_off"
+    print(f"[RPVE] Mode -> {'EV ON' if ev_bool else 'EV OFF'} (sub_type={sub_type})")
 
     try:
-        data = extract_with_llm(sub_type, text, ev_mode=ev_bool)
+        data = extract_with_llm(text, ev_mode=ev_bool)
     except Exception as e:
         raise HTTPException(500, f"LLM extraction failed: {str(e)}")
 
@@ -768,8 +815,82 @@ async def extract(file: UploadFile = File(...), ev_mode: str = Form("false")):
         else:
             active_fields = EV_OFF_FIELDS
 
-        xlsx_path = build_excel(data, sub_type, stem, active_employee_fields=active_fields)
-        json_path = build_json_file(data, sub_type, stem, active_employee_fields=active_fields)
+        # ── EV OFF: ADP Post-Processing ───────────────────────────────────────
+        # If the extracted text looks like an ADP invoice, collapse individual
+        # plan rows per employee into one row (total premium + primary plan name)
+        # and filter out any employee whose total is <= $250.
+        if not ev_bool:
+            extracted_text_upper = text.upper()
+            is_adp = (
+                "TOTALSOURCE" in extracted_text_upper
+                or "ADP" in extracted_text_upper
+                or "NCT3-EPO" in extracted_text_upper
+            )
+            if is_adp:
+                from collections import defaultdict
+                grouped2: dict = defaultdict(list)
+                for emp in data.get("employees", []):
+                    # Initial skip based on names
+                    pname = str(emp.get("plan_name") or "").strip().upper()
+                    copt  = str(emp.get("coverage_option") or "").strip().upper()
+                    if any(x in pname or x in copt for x in ("TOTAL", "SUBTOTAL", "GRAND TOTAL")):
+                        continue
+
+                    key = (
+                        str(emp.get("first_name", "")).strip().upper(),
+                        str(emp.get("last_name", "")).strip().upper()
+                    )
+                    grouped2[key].append(emp)
+
+                collapsed = []
+                for (fname, lname), rows in grouped2.items():
+                    if not rows: continue
+                    
+                    # Parse all premiums
+                    parsed_rows = []
+                    for r in rows:
+                        val_str = str(r.get("monthly_total_premium") or "").replace("$", "").replace(",", "")
+                        try:
+                            v = round(float(re.sub(r'[^\d.-]', '', val_str)), 2)
+                        except:
+                            v = 0.0
+                        parsed_rows.append((v, r))
+
+                    # STRICT RULE: If one row's value is (roughly) the sum of others, it is a TOTAL row.
+                    # We sort by value descending to check the biggest one first.
+                    parsed_rows.sort(key=lambda x: x[0], reverse=True)
+                    
+                    valid_benefit_rows = []
+                    if len(parsed_rows) > 1:
+                        top_val, top_row = parsed_rows[0]
+                        remaining_sum = sum(v for v, r in parsed_rows[1:])
+                        # If the top value is very close to the sum of others, it's a Total row
+                        if abs(top_val - remaining_sum) < 0.1: # Allow 10 cent rounding diff
+                            print(f"[RPVE] Detected and removed TOTAL row for {fname} {lname}: {top_val}")
+                            valid_benefit_rows = parsed_rows[1:]
+                        else:
+                            valid_benefit_rows = parsed_rows
+                    else:
+                        valid_benefit_rows = parsed_rows
+
+                    # Now pick the highest remaining benefit row
+                    if valid_benefit_rows:
+                        # Re-sort just in case
+                        valid_benefit_rows.sort(key=lambda x: x[0], reverse=True)
+                        best_val, best_row = valid_benefit_rows[0]
+
+                        # Final check: is the plan name still suspiciously like a total?
+                        pname = str(best_row.get("plan_name") or "").strip().upper()
+                        if pname not in ("TOTAL", "SUBTOTAL"):
+                            # Filter: keep only if primary plan premium > $250
+                            if best_val > 250:
+                                collapsed.append(best_row)
+
+                data["employees"] = collapsed
+                print(f"[RPVE] ADP Post-Processing: {len(collapsed)} employees kept (primary plan > $250)")
+
+        xlsx_path = build_excel(data, "generic", stem, active_employee_fields=active_fields)
+        json_path = build_json_file(data, "generic", stem, active_employee_fields=active_fields)
     except Exception as build_err:
         import traceback
         print(f"[RPVE] Output building error:\n{traceback.format_exc()}")
@@ -793,13 +914,15 @@ async def extract(file: UploadFile = File(...), ev_mode: str = Form("false")):
     except:
         numeric_total = 0.0
 
+    mode_label = "EV ON Mode" if ev_bool else "EV OFF Mode"
+
     return {
         "status":         "success",
         "type":           "INVOICE",
         "sub_type":       sub_type,
-        "sub_type_label": SUB_TYPE_LABELS.get(sub_type, sub_type),
+        "sub_type_label": mode_label,
         "employee_count": emp_count,
-        "fields_in_excel": EMPLOYEE_FIELDS.get(sub_type, []),
+        "fields_in_excel": active_fields,
         "summary":        summary_dict,
         "excel_file":     xlsx_path.name,
         "json_file":      json_path.name,
