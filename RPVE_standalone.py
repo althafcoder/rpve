@@ -482,6 +482,7 @@ Layout B — MEMBER ROSTER: Each row is a DIFFERENT person (Subscriber, Dependen
   - Process ALL detail sections: CURRENT DETAIL, RETRO DETAIL, ADJUSTMENT DETAIL, etc.
   - Do NOT skip rows because they appear in a RETRO or ADJUSTMENT section.
   - Every person listed in any section must appear as a record.
+  - If a member has premiums of $0.00, you MUST still extract them as a record.
 
 🔹 RELATIONSHIP MAPPING:
   - Subscriber → EE
@@ -519,19 +520,13 @@ You MUST extract EVERY person listed in ANY section:
   Spouse     → SP
   Dependent  → CH
 
-🔹 ADP FORMAT SPECIFIC RULES (APPLY ONLY TO ADP FILES)
-If the document is identified as an ADP invoice (e.g. ADP TotalSource format used under Resourcing), you MUST apply these strict rules. If it is NOT an ADP file, ignore these specific constraints:
+🔹 ADP FORMAT SPECIFIC RULES (APPLY ONLY IF "TOTALSOURCE", "ADP", OR "NCT3-EPO" IS PRESENT)
+If the document is EXPLICITLY identified as an ADP invoice (e.g. ADP TotalSource format), you MUST apply these strict rules. If it is NOT an ADP file, ignore these specific constraints and extract EVERY record regardless of amount:
 
 1. Plan Name Extraction (CRITICAL for ADP):
 Extract ONLY the exact, valid ADP plan name.
 Do NOT extract random text near plan sections, headers, footers, or unrelated labels.
 ✅ Plan name must belong to a defined benefits section, be consistent across employee entries, and appear as a clear plan title.
-❌ Avoid: Partial names, misaligned OCR text, duplicate or noisy values.
-If plan name is unclear: Skip extraction instead of guessing.
-
-2. Subtotal Filtering Rule (CRITICAL for ADP):
-Extract only employee records where the Subtotal Amount > 250 USD.
-Ignore records ≤ 250 USD or empty/invalid subtotal values.
 
 🔹 OUTPUT FIELDS (14 fields per person)
 - data_row: sequential row number
@@ -566,9 +561,11 @@ PDF TEXT: {{text}}
     chunks = []
     current_chunk = []
     current_len = 0
-    # Chunk by ~40,000 chars to avoid hitting the 16k output tokens max limit and timeouts
+    
+    # Chunk by ~3,000 chars to avoid fatigue in EV OFF mode. 
+    # Small chunks ensure high precision for complex 14-field schemas.
     for line in lines:
-        if current_len + len(line) > 40000 and current_chunk:
+        if current_len + len(line) > 3000 and current_chunk:
             chunks.append('\n'.join(current_chunk))
             current_chunk = []
             current_len = 0
@@ -605,7 +602,7 @@ PDF TEXT: {{text}}
                 
             emps = data.get("employees", [])
             all_employees.extend(emps)
-            print(f"  [RPVE] Chunk {i+1}/{len(chunks)} processed -> found {len(emps)} employees")
+            print(f"  [RPVE] Chunk {i+1}/{len(chunks)} processed -> found {len(emps)} records")
         except Exception as e:
             print(f"  [RPVE] Chunk {i+1}/{len(chunks)} failed: {e}")
 

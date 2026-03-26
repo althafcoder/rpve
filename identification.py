@@ -27,10 +27,10 @@ def universal_extract_text(file_path: Path) -> str:
             with open(file_path, "r", encoding="utf-8-sig") as f:
                 reader = csv.reader(f)
                 for i, row in enumerate(reader):
-                    if i > 500: # Limit to first 500 rows
+                    if i > 1000: # Increased limit
                         break
-                    # Use pipes for better column separation
-                    text += " | ".join(str(cell).strip() for cell in row if cell is not None) + "\n"
+                    # PRESERVE EMPTY COLUMNS: Map None to "" and join everything
+                    text += " | ".join(str(cell).strip() if cell is not None else "" for cell in row) + "\n"
         except Exception as e:
             print(f"[IDENTIFY] CSV Error: {e}")
             
@@ -41,15 +41,17 @@ def universal_extract_text(file_path: Path) -> str:
                 wb = openpyxl.load_workbook(file_path, data_only=True)
                 ws = wb.active
                 for i, row in enumerate(ws.iter_rows(values_only=True)):
-                    if i > 500: break
-                    text += " | ".join(str(cell).strip() for cell in row if cell is not None) + "\n"
+                    if i > 1000: break
+                    # PRESERVE EMPTY COLUMNS: Map None to "" and join everything
+                    text += " | ".join(str(cell).strip() if cell is not None else "" for cell in row) + "\n"
             else: # .xls
                 import xlrd
                 wb = xlrd.open_workbook(file_path)
                 ws = wb.sheet_by_index(0)
-                for i in range(min(ws.nrows, 500)):
+                for i in range(min(ws.nrows, 1000)):
                     row = ws.row_values(i)
-                    text += " | ".join(str(cell).strip() for cell in row if cell is not None) + "\n"
+                    # PRESERVE EMPTY COLUMNS: Map None to "" and join everything
+                    text += " | ".join(str(cell).strip() if cell is not None else "" for cell in row) + "\n"
         except Exception as e:
             print(f"[IDENTIFY] Excel Error: {e}")
             
