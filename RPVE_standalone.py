@@ -48,101 +48,34 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 # EXACT FIELD SCHEMAS - only required fields, exactly as per the SVG diagram
 # ══════════════════════════════════════════════════════════════════════════════
 
+STANDARD_FIELDS = [
+    "FULL_NAME",
+    "FIRST_NAME",
+    "MIDDAL_NAME",
+    "LAST_NAME",
+    "COVERAGE",
+    "PLAN_NAME",
+    "PLAN_TYPE",
+    "CURRENT_PREMIUM",
+    "ADJUSTMENT_AMOUNT",
+    "BIRTH_DATE",
+    "GENDER",
+    "HOME_ZIP_CODE",
+]
+
 EMPLOYEE_FIELDS = {
-
-    # ── Engage: 5 fields ────────────────────────────────────────────────
-    "engage": [
-        "FIRST_NAME",
-        "LAST_NAME",
-        "COVERAGE",
-        "PLAN_NAME",
-        "COVERAGE_OPTION",
-        "CURRENT_PREMIUM",
-    ],
-
-    # ── Velocity: 5 fields ──────────────────────────────────────────────
-    "velocity": [
-        "FIRST_NAME",
-        "LAST_NAME",
-        "COVERAGE",
-        "PLAN_NAME",
-        "COVERAGE_OPTION",
-        "CURRENT_PREMIUM",
-    ],
-
-    # ── Resourcing (Kaiser + UHC): 10 required fields ────────────────────────
-    # Current Plan Enrolled and Monthly Total Premium are NOT included (not required)
-    "resourcing_kaiser": [
-        "DATA_ROW",
-        "FIRST_NAME",
-        "LAST_NAME",
-        "GENDER",
-        "DATE_OF_BIRTH",
-        "HOME_ZIP_CODE",
-        "RELATIONSHIP_TO_EMPLOYEE",
-        "DEPENDENT_OF_EMPLOYEE_ROW",
-        "COVERAGE",
-        "COBRA_PARTICIPANT",
-        "CURRENT_PLAN_ENROLLED",
-        "MONTHLY_TOTAL_PREMIUM",
-    ],
-    "resourcing_uhc": [
-        "DATA_ROW",
-        "FIRST_NAME",
-        "LAST_NAME",
-        "GENDER",
-        "DATE_OF_BIRTH",
-        "HOME_ZIP_CODE",
-        "RELATIONSHIP_TO_EMPLOYEE",
-        "DEPENDENT_OF_EMPLOYEE_ROW",
-        "COVERAGE",
-        "COBRA_PARTICIPANT",
-        "CURRENT_PLAN_ENROLLED",
-        "MONTHLY_TOTAL_PREMIUM",
-    ],
-
-    # ── Prestige (Aetna): 9 required fields ─────────────────────────────────
-    # Date of Birth and Home Zip Code are NOT included (not required)
-    "prestige": [
-        "DATA_ROW",
-        "FIRST_NAME",
-        "LAST_NAME",
-        "GENDER",
-        "RELATIONSHIP_TO_EMPLOYEE",
-        "DEPENDENT_OF_EMPLOYEE_ROW",
-        "COVERAGE",
-        "COBRA_PARTICIPANT",
-        "PLAN_NAME",
-    ],
+    "engage": STANDARD_FIELDS,
+    "velocity": STANDARD_FIELDS,
+    "resourcing_kaiser": STANDARD_FIELDS,
+    "resourcing_uhc": STANDARD_FIELDS,
+    "prestige": STANDARD_FIELDS,
 }
 
 # EV_OFF Strict Requirement: All 14 fields
-EV_OFF_FIELDS = [
-    "DATA_ROW",
-    "FIRST_NAME",
-    "LAST_NAME",
-    "GENDER",
-    "DATE_OF_BIRTH",
-    "HOME_ZIP_CODE",
-    "RELATIONSHIP_TO_EMPLOYEE",
-    "DEPENDENT_OF_EMPLOYEE_ROW",
-    "COVERAGE",
-    "COVERAGE_OPTION",
-    "COBRA_PARTICIPANT",
-    "CURRENT_PLAN_ENROLLED",
-    "PLAN_NAME",
-    "MONTHLY_TOTAL_PREMIUM",
-]
+EV_OFF_FIELDS = STANDARD_FIELDS
 
 # EV_ON Strict Requirement: 6 fields
-EV_ON_FIELDS = [
-    "FIRST_NAME",
-    "LAST_NAME",
-    "COVERAGE",
-    "PLAN_NAME",
-    "COVERAGE_OPTION",
-    "CURRENT_PREMIUM",
-]
+EV_ON_FIELDS = STANDARD_FIELDS
 
 SUMMARY_FIELDS = {
     "engage":            ["COMPANY_NAME", "INVOICE_NUMBER", "BILLING_DATE", "DUE_DATE", "REFERENCE_NUMBER", "TOTAL_COST"],
@@ -452,57 +385,8 @@ def classify(text: str) -> str | None:
 def extract_with_llm(text: str, ev_mode: bool = False) -> dict:
     # Classification-free extraction: EV Mode alone drives the extraction rules.
 
-    if ev_mode:
-        # EV MODE IS ON: Extract individual plan rows + subtotals per employee.
-        prompt_template = """
-You are extracting data from a group insurance invoice.
-
-Extract a SUMMARY and EMPLOYEES array.
-
-SUMMARY fields: company_name, invoice_number, billing_period, total_amount_due
-
-🔹 EMPLOYEE EXTRACTION RULES:
-
-This invoice may use ONE of two layouts:
-
-Layout A — MULTI-PLAN BLOCK: One employee has multiple plan rows (Medical, Dental, Vision, etc.)
-  - Extract ONE row per plan line per employee.
-  - After all plan rows for an employee, add a SUBTOTAL row: coverage_option = "TOTAL", current_premium = combined total.
-
-Layout B — MEMBER ROSTER: Each row is a DIFFERENT person (Subscriber, Dependent, Spouse).
-  - Extract EVERY row as a separate record — do NOT collapse them.
-  - Do NOT create TOTAL rows for individual members in this layout.
-  - Capture: first_name, last_name, coverage (Subscriber→EE, Spouse→SP, Dependent→CH), plan_name (plan description), current_premium (charge amount).
-
-🔹 NEGATIVE VALUES (CRITICAL):
-  - If a premium, charge, or adjustment is negative (e.g. $-927.66 or -$927.66), you MUST include the minus sign in the output.
-  - Do NOT ignore or drop the minus sign.
-
-🔹 CRITICAL - CAPTURE ALL SECTIONS:
-  - Process ALL detail sections: CURRENT DETAIL, RETRO DETAIL, ADJUSTMENT DETAIL, etc.
-  - Do NOT skip rows because they appear in a RETRO or ADJUSTMENT section.
-  - Every person listed in any section must appear as a record.
-  - If a member has premiums of $0.00, you MUST still extract them as a record.
-
-🔹 RELATIONSHIP MAPPING:
-  - Subscriber → EE
-  - Spouse     → SP
-  - Dependent  → CH
-
-Return ONLY valid JSON.
-
-{{
-  "summary": {{"company_name": "", "invoice_number": "", "billing_period": "", "total_amount_due": ""}},
-  "employees": [{{"first_name": "", "last_name": "", "coverage": "", "plan_name": "", "coverage_option": "", "current_premium": ""}}]
-}}
-
-PDF TEXT: {{text}}
-"""
-    else:
-        # EV MODE IS OFF: Strictly follow the 13-field requirement (Resourcing/Prestige).
-        # Even if the document is Engage/Velocity, we force the 13-field structure.
-        prompt_template = """
-You are a data extraction engine operating in EV OFF mode, processing a group insurance invoice.
+    prompt_template = """
+You are a data extraction engine processing a group insurance invoice.
 
 🔹 CAPTURE ALL MEMBERS & ADJUSTMENTS (CRITICAL)
 This invoice may list members in a ROSTER format where each row is a separate individual (Subscriber, Spouse, Dependent).
@@ -513,12 +397,7 @@ You MUST extract EVERY person listed in ANY section:
   - Any other detail section in the document
 
 🔹 NEGATIVE VALUES (CRITICAL):
-  - If a value is negative (e.g. $-100.00), you MUST preserve the minus sign in the monthly_total_premium field.
-
-🔹 RELATIONSHIP MAPPING
-  Subscriber → EE
-  Spouse     → SP
-  Dependent  → CH
+  - If a value is negative (e.g. $-100.00), you MUST preserve the minus sign in the current_premium or adjustment_amount field.
 
 🔹 ADP FORMAT SPECIFIC RULES (APPLY ONLY IF "TOTALSOURCE", "ADP", OR "NCT3-EPO" IS PRESENT)
 If the document is EXPLICITLY identified as an ADP invoice (e.g. ADP TotalSource format), you MUST apply these strict rules. If it is NOT an ADP file, ignore these specific constraints and extract EVERY record regardless of amount:
@@ -529,24 +408,21 @@ Do NOT extract random text near plan sections, headers, footers, or unrelated la
 ✅ Plan name must belong to a defined benefits section, be consistent across employee entries, and appear as a clear plan title.
 
 🔹 DO NOT ABBREVIATE OR TRUNCATE PLAN NAMES (CRITICAL):
-The plan name and coverage option MUST match the FULL string found in the "Plan" column of the PDF.
-For example, if the text says "ANTHMO BC-Select HMO 1500-SCA", do NOT shorten it to "ANTHMO BC-Select HMO" or "ANTHMO BC-Select HMO 15". Capture the ENTIRE sequence including numbers and suffixes (e.g., -SCA, $2000, etc.).
+The plan name MUST match the FULL string found in the "Plan" column of the PDF.
 
-🔹 OUTPUT FIELDS (14 fields per person)
-- data_row: sequential row number
+🔹 OUTPUT FIELDS (12 fields per person)
+- full_name
 - first_name
+- middal_name (Middle Name)
 - last_name
+- coverage (e.g. ES / EC / FAM / EE / SP / CH)
+- plan_name (FULL plan/product description — do NOT truncate)
+- plan_type (insurance category: Medical, Dental, Vision, etc.)
+- current_premium: The individual plan line cost for that specific plan row.
+- adjustment_amount: Any adjustment amount listed.
+- birth_date
 - gender (M / F — infer if not present)
-- date_of_birth
 - home_zip_code
-- relationship_to_employee (EE / SP / CH)
-- dependent_of_employee_row
-- coverage (ES / EC / FAM / EE / SP / CH — use relationship if coverage tier not listed)
-- coverage_option (FULL insurance product name — do NOT truncate)
-- cobra_participant (Y / N)
-- current_plan_enrolled (FULL plan/product description — do NOT truncate)
-- plan_name (insurance category: Medical, Dental, Vision, etc.)
-- monthly_total_premium: The individual plan line cost for that specific plan row. Do NOT use the employee's "Total" or "Subtotal" row — extract each plan line as its own row with its own cost.
 
 🔹 KEY RULES
 - One row per individual member.
@@ -555,7 +431,7 @@ For example, if the text says "ANTHMO BC-Select HMO 1500-SCA", do NOT shorten it
 
 {{
   "summary": {{"company_name": "", "total_amount_due": ""}},
-  "employees": [{{"data_row": null, "first_name": null, "last_name": null, "gender": null, "date_of_birth": null, "home_zip_code": null, "relationship_to_employee": null, "dependent_of_employee_row": null, "coverage": null, "coverage_option": null, "cobra_participant": null, "current_plan_enrolled": null, "plan_name": null, "monthly_total_premium": null}}]
+  "employees": [{{"full_name": null, "first_name": null, "middal_name": null, "last_name": null, "coverage": null, "plan_name": null, "plan_type": null, "current_premium": null, "adjustment_amount": null, "birth_date": null, "gender": null, "home_zip_code": null}}]
 }}
 
 PDF TEXT: {{text}}
@@ -763,9 +639,8 @@ async def health():
 
 
 @app.post("/api/extract")
-async def extract(file: UploadFile = File(...), ev_mode: str = Form("false")):
-    ev_bool = ev_mode.lower() == "true"
-    print(f"\n[RPVE] Extraction Mode -> EV={ev_bool} (Raw: {ev_mode})")
+async def extract(file: UploadFile = File(...)):
+    print(f"\n[RPVE] Extraction Mode -> Standard")
     if not file.filename:
         raise HTTPException(400, "No filename provided")
     ext = Path(file.filename).suffix.lower()
@@ -795,12 +670,12 @@ async def extract(file: UploadFile = File(...), ev_mode: str = Form("false")):
     if not text.strip():
         raise HTTPException(422, "No text extracted. File may be empty or an unreadable image.")
 
-    # No AI classification — EV Mode drives everything.
-    sub_type = "ev_on" if ev_bool else "ev_off"
-    print(f"[RPVE] Mode -> {'EV ON' if ev_bool else 'EV OFF'} (sub_type={sub_type})")
+    # No AI classification — Standard Mode drives everything.
+    sub_type = "standard"
+    print(f"[RPVE] Mode -> Standard (sub_type={sub_type})")
 
     try:
-        data = extract_with_llm(text, ev_mode=ev_bool)
+        data = extract_with_llm(text)
     except Exception as e:
         raise HTTPException(500, f"LLM extraction failed: {str(e)}")
 
@@ -811,51 +686,47 @@ async def extract(file: UploadFile = File(...), ev_mode: str = Form("false")):
     
     try:
         # Determine the actual fields used for this extraction strictly by mode
-        if ev_bool:
-            active_fields = EV_ON_FIELDS
-        else:
-            active_fields = EV_OFF_FIELDS
+        active_fields = STANDARD_FIELDS
 
-        # ── EV OFF: ADP Post-Processing ───────────────────────────────────────
+        # ── ADP Post-Processing ───────────────────────────────────────
         # If the extracted text looks like an ADP invoice, collapse individual
         # plan rows per employee into one row (total premium + primary plan name)
         # and filter out any employee whose total is <= $250.
-        if not ev_bool:
-            extracted_text_upper = text.upper()
-            is_adp = (
-                "TOTALSOURCE" in extracted_text_upper
-                or "ADP" in extracted_text_upper
-                or "NCT3-EPO" in extracted_text_upper
-            )
-            if is_adp:
-                from collections import defaultdict
-                grouped2: dict = defaultdict(list)
-                for emp in data.get("employees", []):
-                    # Initial skip based on names
-                    pname = str(emp.get("plan_name") or "").strip().upper()
-                    copt  = str(emp.get("coverage_option") or "").strip().upper()
-                    if any(x in pname or x in copt for x in ("TOTAL", "SUBTOTAL", "GRAND TOTAL")):
-                        continue
+        extracted_text_upper = text.upper()
+        is_adp = (
+            "TOTALSOURCE" in extracted_text_upper
+            or "ADP" in extracted_text_upper
+            or "NCT3-EPO" in extracted_text_upper
+        )
+        if is_adp:
+            from collections import defaultdict
+            grouped2: dict = defaultdict(list)
+            for emp in data.get("employees", []):
+                # Initial skip based on names
+                pname = str(emp.get("plan_name") or "").strip().upper()
+                copt  = str(emp.get("plan_type") or "").strip().upper()
+                if any(x in pname or x in copt for x in ("TOTAL", "SUBTOTAL", "GRAND TOTAL")):
+                    continue
 
-                    key = (
-                        str(emp.get("first_name", "")).strip().upper(),
-                        str(emp.get("last_name", "")).strip().upper()
-                    )
-                    grouped2[key].append(emp)
+                key = (
+                    str(emp.get("first_name", "")).strip().upper(),
+                    str(emp.get("last_name", "")).strip().upper()
+                )
+                grouped2[key].append(emp)
 
-                collapsed = []
-                for (fname, lname), rows in grouped2.items():
-                    if not rows: continue
-                    
-                    # Parse all premiums
-                    parsed_rows = []
-                    for r in rows:
-                        val_str = str(r.get("monthly_total_premium") or "").replace("$", "").replace(",", "")
-                        try:
-                            v = round(float(re.sub(r'[^\d.-]', '', val_str)), 2)
-                        except:
-                            v = 0.0
-                        parsed_rows.append((v, r))
+            collapsed = []
+            for (fname, lname), rows in grouped2.items():
+                if not rows: continue
+                
+                # Parse all premiums
+                parsed_rows = []
+                for r in rows:
+                    val_str = str(r.get("current_premium") or "").replace("$", "").replace(",", "")
+                    try:
+                        v = round(float(re.sub(r'[^\d.-]', '', val_str)), 2)
+                    except:
+                        v = 0.0
+                    parsed_rows.append((v, r))
 
                     # STRICT RULE: If one row's value is (roughly) the sum of others, it is a TOTAL row.
                     # We sort by value descending to check the biggest one first.
@@ -887,8 +758,8 @@ async def extract(file: UploadFile = File(...), ev_mode: str = Form("false")):
                             if best_val > 250:
                                 collapsed.append(best_row)
 
-                data["employees"] = collapsed
-                print(f"[RPVE] ADP Post-Processing: {len(collapsed)} employees kept (primary plan > $250)")
+            data["employees"] = collapsed
+            print(f"[RPVE] ADP Post-Processing: {len(collapsed)} employees kept (primary plan > $250)")
 
         xlsx_path = build_excel(data, "generic", stem, active_employee_fields=active_fields)
         json_path = build_json_file(data, "generic", stem, active_employee_fields=active_fields)
@@ -915,7 +786,7 @@ async def extract(file: UploadFile = File(...), ev_mode: str = Form("false")):
     except:
         numeric_total = 0.0
 
-    mode_label = "EV ON Mode" if ev_bool else "EV OFF Mode"
+    mode_label = "Standard Mode"
 
     return {
         "status":         "success",

@@ -17,7 +17,6 @@ const Index = () => {
     useDocumentProcessor();
   const [mergedSummary, setMergedSummary] = useState<string | null>(null);
   const [isMerging, setIsMerging] = useState(false);
-  const [evMode, setEvMode] = useState(false);
 
   const getMergeCategory = (type?: string) => {
     if (!type) return "UNKNOWN";
@@ -128,34 +127,9 @@ const Index = () => {
       <AppHeader />
 
       <main className="max-w-7xl mx-auto px-4 sm:px-8 py-8">
-        {/* EV Mode Toggle */}
-        <div className="mb-6 flex items-center justify-end gap-3 animated-fade-in">
-          <div className="flex flex-col items-end">
-            <Label htmlFor="ev-mode" className="text-sm font-bold text-foreground flex items-center gap-2">
-              EV (Engage + Velocity Mode)
-              {evMode ? (
-                <span className="text-[10px] bg-primary/20 text-primary px-1.5 py-0.5 rounded uppercase tracking-wider">Active</span>
-              ) : (
-                <span className="text-[10px] bg-muted text-muted-foreground px-1.5 py-0.5 rounded uppercase tracking-wider">Inactive</span>
-              )}
-            </Label>
-            <p className="text-[10px] text-muted-foreground mt-0.5 max-w-[200px] text-right">
-              {evMode 
-                ? "Extracting ONLY Plan Name and Current Premium for ADP/Paychex." 
-                : "Extracting complete demographic and coverage fields for Resourcing/Prestige."}
-            </p>
-          </div>
-          <Switch
-            id="ev-mode"
-            checked={evMode}
-            onCheckedChange={setEvMode}
-            className="data-[state=checked]:bg-primary"
-          />
-        </div>
-
         {/* Upload Section */}
         <section className="mb-8">
-          <UploadArea onFilesSelected={(files) => addFiles(files, evMode)} />
+          <UploadArea onFilesSelected={(files) => addFiles(files, false)} />
         </section>
 
         {!hasDocuments && (
@@ -221,7 +195,7 @@ const Index = () => {
                 )}
                 <ResultsPanel
                   document={selectedDoc}
-                  onReprocess={(id) => reprocessDocument(id, evMode)}
+                  onReprocess={(id) => reprocessDocument(id, false)}
                   mergedSummary={mergedSummary}
                   isMerging={isMerging}
                   onTriggerMergeAnalysis={handleTriggerMergeAnalysis}
