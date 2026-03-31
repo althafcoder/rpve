@@ -245,29 +245,43 @@ PDF TEXT: {text}
     "resourcing_uhc": """
 You are extracting data from a UnitedHealthcare (UHC) group insurance invoice PDF.
 
-Extract a SUMMARY and EMPLOYEES array.
+Extract a SUMMARY and EMPLOYEES array based on the following rules.
 
 SUMMARY: company_name, invoice_number, invoice_date, coverage_period, customer_number, total_balance_due
 
-EMPLOYEES - one row per member (12 required fields only):
-  data_row                  : sequential row number
+EMPLOYEES - one row per member. Extract from "Details" or "Current Detail" sections. Ignore "Summary" sections for employee data.
+  policy_id                 : The Policy ID for the member.
+  member_id                 : The Member ID for the individual.
   first_name                : member first name
   last_name                 : member last name
+  relationship_to_employee  : EE / SP / CH
+  coverage                  : Coverage code. Apply these mappings: E -> EE, ESC -> FAM.
+  current_plan_enrolled     : Full plan name. Capture multi-line descriptions.
+  current_premium           : Premium from "Current Detail" section.
+  adjustment_amount         : Premium from "Adjustment Detail" section.
+  data_row                  : sequential row number
   gender                    : M or F
   date_of_birth             : date of birth (4-digit year format)
   home_zip_code             : member zip code
-  relationship_to_employee  : EE / SP / CH
   dependent_of_employee_row : data_row of their employee (blank if EE)
-  coverage                  : Extract EXACT coverage code from invoice (e.g. E, ES, ESC, EC, E1D, E2D, E3D, E4D, E5D, E6D, E7D, E8D, E9D, EE, FAM, etc.)
-  cobra_participant          : Y or N  (C = Cobra -> Y)
-  current_plan_enrolled     : specific plan enrolled (CRITICAL: Plan names often print across MULTIPLE consecutive physical lines in the invoice. You MUST aggressively capture every single line of the plan description into one combined string. Do not stop at the first line! Enter for Employee row only, blank for dependent rows)
-  monthly_total_premium     : total premium for employee's tier (enter for Employee row only, blank for dependent rows)
+  cobra_participant         : Y or N  (C = Cobra -> Y)
+
+CRITICAL RULES:
+1.  IDENTIFIERS: Extract `POLICYID` and `MEMBERID`. DO NOT extract Social Security Numbers (SSNs); if you see an SSN, output "NULL-SSN" for that field.
+2.  DATA SOURCE: Extract employee data ONLY from "Details" or "Current Detail" sections. Ignore "Summary" sections.
+3.  COVERAGE MAPPING: Convert coverage codes: 'E' becomes 'EE', 'ESC' becomes 'FAM'.
+4.  PLAN NAME: Capture the complete, multi-line plan name.
+5.  FINANCIALS: 
+    - Extract the grand total into the summary's 'total_balance_due'.
+    - For employees, map charges from "Current Detail" to 'current_premium'.
+    - Map charges from "Adjustment Detail" to 'adjustment_amount'.
+    - The field `monthly_total_premium` is replaced by `current_premium` and `adjustment_amount`.
 
 Use "" for missing values. Return ONLY valid JSON.
 
 {{
   "summary": {{"company_name":"","invoice_number":"","invoice_date":"","coverage_period":"","customer_number":"","total_balance_due":""}},
-  "employees": [{{"data_row":"","first_name":"","last_name":"","gender":"","date_of_birth":"","home_zip_code":"","relationship_to_employee":"","dependent_of_employee_row":"","coverage":"","cobra_participant":"","current_plan_enrolled":"","monthly_total_premium":""}}]
+  "employees": [{{"policy_id":"","member_id":"","first_name":"","last_name":"","relationship_to_employee":"","coverage":"","current_plan_enrolled":"","current_premium":"","adjustment_amount":"","data_row":"","gender":"","date_of_birth":"","home_zip_code":"","dependent_of_employee_row":"","cobra_participant":""}}]
 }}
 
 PDF TEXT: {text}
@@ -492,6 +506,55 @@ PDF TEXT: {{text}}
     }
 
 
+def deduplicate_employees(employees: list[dict]) -> list[dict]:
+    """
+    Removes duplicate employee records from a list.
+
+    This function identifies duplicates based on a combination of the employee's
+    name and their plan name. It prioritizes a full name field but will fall
+    back to combining first and last names. It preserves the first occurrence
+    of each unique record and discards subsequent duplicates.
+
+    Args:
+        employees: A list of employee data dictionaries, where each dictionary
+                   represents an extracted row from the invoice.
+
+    Returns:
+        A new list of employee data dictionaries with duplicates removed.
+    """
+    original_count = len(employees)
+    seen = set()
+    deduplicated_list = []
+    for employee in employees:
+        # To identify a unique record, we use a combination of the employee's
+        # name and their plan name. The generic extractor returns lowercase keys.
+        plan_name = (employee.get("plan_name") or "").strip()
+        full_name = (employee.get("full_name") or "").strip()
+
+        if not full_name:
+            first_name = (employee.get("first_name") or "").strip()
+            last_name = (employee.get("last_name") or "").strip()
+            if first_name and last_name:
+                full_name = f"{first_name} {last_name}"
+
+        # We only consider records for deduplication if they have both a name
+        # and a plan. If either is missing, we keep the record to avoid data loss.
+        if not full_name or not plan_name:
+            deduplicated_list.append(employee)
+            continue
+
+        unique_key = (full_name.upper(), plan_name.upper())
+        if unique_key not in seen:
+            seen.add(unique_key)
+            deduplicated_list.append(employee)
+
+    deduplicated_count = len(deduplicated_list)
+    removed_count = original_count - deduplicated_count
+    if removed_count > 0:
+        print(f"[RPVE] Deduplication: {original_count} rows -> {deduplicated_count} rows ({removed_count} duplicates removed)")
+
+    return deduplicated_list
+
 def build_excel(data: dict, sub_type: str, stem: str, active_employee_fields: list[str] | None = None) -> Path:
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -509,7 +572,8 @@ def build_excel(data: dict, sub_type: str, stem: str, active_employee_fields: li
     tfill     = PatternFill("solid", fgColor="F0F0F0")
 
     summary   = data.get("summary", {})
-    employees = data.get("employees", [])
+    # Deduplicate employee records before writing to Excel
+    employees = deduplicate_employees(data.get("employees", []))
 
     # ── Sheet 1: Employee Details ─────────────────────────────────────────────
     we = wb.active
