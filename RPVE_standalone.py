@@ -443,6 +443,22 @@ The plan name MUST match the FULL string found in the "Plan" column of the PDF.
 - Accuracy > Completeness. Return valid JSON only.
 - Do not hallucinate plan names.
 
+🔹 Coverage Recovery (FULL UHC MAPPING): Map coverage type codes using the following legend for ALL UHC documents:
+    - `E` or "Employee Only" → **EE**
+    - `ES` or "Employee and Spouse" → **ES**
+    - `ESC` or "Employee and Family" → **FAM**
+    - `EC` or "Employee and Child(ren)" → **EC**
+    - `E1D` or "Employee and One Dependent" → **EC**
+    - `E2D` or "Employee and Two Dependents" → **EC**
+    - `E3D` or "Employee and Three Dependents" → **EC**
+    - `E4D` or "Employee and Four Dependents" → **EC**
+    - `E5D` or "Employee & One or More Dependent" → **EC**
+    - `E6D` or "Employee & Two or More Dependents" → **EC**
+    - `E7D` or "Employee & Three or More Dependents" → **EC**
+    - `E8D` or "Employee & Four or More Dependents" → **EC**
+    - `E9D` or "Employee & Five or More Dependents" → **EC**
+    - Single-letter codes only (when alone): `E` → **EE**, `S` → **ES**, `F` → **FAM**, `C` → **EC**, `E E` → **EE**
+
 {{
   "summary": {{"company_name": "", "total_amount_due": ""}},
   "employees": [{{"full_name": null, "first_name": null, "middal_name": null, "last_name": null, "coverage": null, "plan_name": null, "plan_type": null, "current_premium": null, "adjustment_amount": null, "birth_date": null, "gender": null, "home_zip_code": null}}]
