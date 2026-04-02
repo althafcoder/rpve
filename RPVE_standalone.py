@@ -45,72 +45,56 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # ══════════════════════════════════════════════════════════════════════════════
-# EXACT FIELD SCHEMAS - only required fields, exactly as per the SVG diagram
+# UNIFIED FIELD SCHEMA
 # ══════════════════════════════════════════════════════════════════════════════
 
-STANDARD_FIELDS = [
-    "FULL_NAME",
-    "FIRST_NAME",
-    "MIDDAL_NAME",
-    "LAST_NAME",
-    "COVERAGE",
-    "PLAN_NAME",
-    "PLAN_TYPE",
-    "CURRENT_PREMIUM",
-    "ADJUSTMENT_AMOUNT",
-    "BIRTH_DATE",
-    "GENDER",
-    "HOME_ZIP_CODE",
+# A single, unified schema for all extractions as per user requirements.
+# The specialized "engage" prompt is also designed to return these fields.
+UNIFIED_FIELDS = [
+    "full_name",
+    "first_name",
+    "middal_name",
+    "last_name",
+    "coverage",
+    "plan_name",
+    "plan_type",
+    "current_premium",
+    "adjustment_amount",
+    "birth_date",
+    "gender",
+    "home_zip_code",
+    "billing_period",
 ]
 
+# The employee fields dictionary now only distinguishes between ADP and generic.
 EMPLOYEE_FIELDS = {
-    "engage": STANDARD_FIELDS,
-    "velocity": STANDARD_FIELDS,
-    "resourcing_kaiser": STANDARD_FIELDS,
-    "resourcing_uhc": STANDARD_FIELDS,
-    "prestige": STANDARD_FIELDS,
+    "engage":  UNIFIED_FIELDS,
+    "generic": UNIFIED_FIELDS,
 }
 
-# EV_OFF Strict Requirement: All 14 fields
-EV_OFF_FIELDS = STANDARD_FIELDS
-
-# EV_ON Strict Requirement: 6 fields
-EV_ON_FIELDS = STANDARD_FIELDS
-
+# Simplified summary fields. The generic prompt will attempt to find these.
 SUMMARY_FIELDS = {
-    "engage":            ["COMPANY_NAME", "INVOICE_NUMBER", "BILLING_DATE", "DUE_DATE", "REFERENCE_NUMBER", "TOTAL_COST"],
-    "velocity":          ["COMPANY_NAME", "CLIENT_NUMBER", "STATEMENT_DATE", "STATEMENT_NUMBER", "GRAND_TOTAL"],
-    "prestige":          ["COMPANY_NAME", "BILL_NUMBER", "TRIAD_NUMBER", "ACCOUNT_NUMBER", "SERVICE_PERIOD", "AMOUNT_DUE"],
-    "resourcing_kaiser": ["COMPANY_NAME", "BILLING_ID", "GROUP_ID", "INVOICE_NUMBER", "BILLING_MONTH", "TOTAL_AMOUNT_DUE"],
-    "resourcing_uhc":    ["COMPANY_NAME", "INVOICE_NUMBER", "INVOICE_DATE", "COVERAGE_PERIOD", "CUSTOMER_NUMBER", "TOTAL_BALANCE_DUE"],
+    "engage":  ["COMPANY_NAME", "INVOICE_NUMBER", "BILLING_DATE", "DUE_DATE", "REFERENCE_NUMBER", "TOTAL_COST"],
+    "generic": ["COMPANY_NAME", "INVOICE_NUMBER", "BILLING_DATE", "DUE_DATE", "TOTAL_AMOUNT_DUE"],
 }
 
 SUB_TYPE_LABELS = {
-    "engage":            "Engage  (ADP TotalSource)",
-    "velocity":          "Velocity  (Paychex PEO)",
-    "prestige":          "Prestige  (Aetna)",
-    "resourcing_kaiser": "Resourcing  (Kaiser Permanente)",
-    "resourcing_uhc":    "Resourcing  (UnitedHealthcare)",
+    "engage":  "Engage (ADP TotalSource)",
+    "generic": "Generic Document",
 }
 
 HEADER_COLOURS = {
-    "engage":            "3C3489",
-    "velocity":          "854F0B",
-    "prestige":          "712B13",
-    "resourcing_kaiser": "085041",
-    "resourcing_uhc":    "0C447C",
+    "engage":  "3C3489",
+    "generic": "666666",
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
 # KEYWORD CLASSIFIER
 # ══════════════════════════════════════════════════════════════════════════════
 
+# Simplified to only identify ADP ("engage") documents.
 KEYWORDS = {
-    "engage":            ["TOTALSOURCE", "TOTALSOURCE BENEFITS INVOICE", "TOTALSOURCE® BENEFITS INVOICE", "NCT3-EPO"],
-    "velocity":          ["PAYCHEX", "PEO BENEFITS ADMINISTRATION", "HUMAN RESOURCE SERVICES", "1175 JOHN ST"],
-    "prestige":          ["AETNA", "CURRENT INFORCE CHARGES", "TRIAD NUMBER", "BILL PACKAGE"],
-    "resourcing_kaiser": ["KAISER PERMANENTE", "KAISER FOUNDATION HEALTH PLAN", "BUSINESS.KP.ORG"],
-    "resourcing_uhc":    ["UNITEDHEALTHCARE", "UHS PREMIUM BILLING", "UHCESERVICES.COM", "CONSOLIDATED CUSTOMER NO"],
+    "engage": ["TOTALSOURCE", "TOTALSOURCE BENEFITS INVOICE", "TOTALSOURCE® BENEFITS INVOICE", "NCT3-EPO"],
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -151,141 +135,9 @@ Use "" for missing values. Return ONLY valid JSON.
 PDF TEXT: {text}
 """,
 
-    "velocity": """
-You are extracting data from a Paychex PEO Benefits Administration statement PDF.
+    # All other prompts are removed. The generic prompt is now the main fallback
+    # in the `extract_with_llm` function itself.
 
-Extract a SUMMARY and EMPLOYEES array.
-
-SUMMARY: company_name, client_number, statement_date, statement_number, grand_total
-
-EMPLOYEES - one row per plan line per employee, PLUS a subtotal row for each employee:
-  first_name       : member first name
-  last_name        : member last name
-  coverage         : EXACT coverage tier/code (e.g. Employee, Family, EE+1, E, ES, ESC, EC, E1D, E2D, E3D, E4D, E5D, E6D, E7D, E8D, E9D, etc.)
-  plan_name        : insurance category/type (e.g. Medical, Dental, Vision)
-  coverage_option  : specific insurance product name (e.g. UnitedHealthcare Dental PPO 50, Choice Plus HDHP 1700)
-  current_premium  : dollar amount for that plan line
-
-Rules: 
-1. INDIVIDUAL PLAN LINES: Extract every plan line for an employee with its individual cost.
-2. SUBTOTAL ROW: After all plan lines for an employee, add ONE subtotal row:
-   - coverage_option: (Set to exactly "TOTAL")
-   - current_premium: the sub-total amount for that specific employee.
-3. Each person must be represented by their individual plan rows, followed by their "TOTAL" subtotal row.
-Use "" for missing values. Return ONLY valid JSON.
-
-{{
-  "summary": {{"company_name":"","client_number":"","statement_date":"","statement_number":"","grand_total":""}},
-  "employees": [{{"first_name":"","last_name":"","coverage":"","plan_name":"","coverage_option":"","current_premium":""}}]
-}}
-
-PDF TEXT: {text}
-""",
-
-    "prestige": """
-You are extracting data from an Aetna group health insurance bill PDF.
-
-Extract a SUMMARY and EMPLOYEES array.
-
-SUMMARY: company_name, bill_number, triad_number, account_number, service_period, amount_due
-
-EMPLOYEES - one row per member (9 required fields only):
-  data_row                  : sequential row number
-  first_name                : member first name
-  last_name                 : member last name
-  gender                    : M or F
-  relationship_to_employee  : EE / SP / CH
-  dependent_of_employee_row : data_row of their employee (blank if EE)
-  coverage                  : Extract EXACT coverage code from invoice (e.g. E, ES, ESC, EC, E1D, E2D, E3D, E4D, E5D, E6D, E7D, E8D, E9D, EE, FAM, etc.)
-  cobra_participant          : Y or N
-  plan_name                 : specific plan name enrolled
-
-DO NOT include date_of_birth or home_zip_code - not required for Prestige.
-Use "" for missing values. Return ONLY valid JSON.
-
-{{
-  "summary": {{"company_name":"","bill_number":"","triad_number":"","account_number":"","service_period":"","amount_due":""}},
-  "employees": [{{"data_row":"","first_name":"","last_name":"","gender":"","relationship_to_employee":"","dependent_of_employee_row":"","coverage":"","cobra_participant":"","plan_name":""}}]
-}}
-
-PDF TEXT: {text}
-""",
-
-    "resourcing_kaiser": """
-You are extracting data from a Kaiser Permanente group health bill PDF.
-
-Extract a SUMMARY and EMPLOYEES array.
-
-SUMMARY: company_name, billing_id, group_id, invoice_number, billing_month, total_amount_due
-
-EMPLOYEES - one row per member (12 required fields only):
-  data_row                  : sequential row number
-  first_name                : member first name
-  last_name                 : member last name
-  gender                    : M or F
-  date_of_birth             : date of birth (4-digit year format)
-  home_zip_code             : member zip code
-  relationship_to_employee  : EE / SP / CH
-  dependent_of_employee_row : data_row of their employee (blank if EE)
-  coverage                  : Extract EXACT coverage code from invoice (e.g. E, ES, ESC, EC, E1D, E2D, E3D, E4D, E5D, E6D, E7D, E8D, E9D, EE, FAM, etc.)
-  cobra_participant          : Y or N
-  current_plan_enrolled     : specific plan enrolled (CRITICAL: Plan names often span across MULTIPLE physical lines in the invoice. You MUST aggressively capture the entire multi-line block into one string. Do not stop at the first line! Enter for Employee row only, blank for dependent rows)
-  monthly_total_premium     : total premium for employee's tier (enter for Employee row only, blank for dependent rows)
-
-Use "" for missing values. Return ONLY valid JSON.
-
-{{
-  "summary": {{"company_name":"","billing_id":"","group_id":"","invoice_number":"","billing_month":"","total_amount_due":""}},
-  "employees": [{{"data_row":"","first_name":"","last_name":"","gender":"","date_of_birth":"","home_zip_code":"","relationship_to_employee":"","dependent_of_employee_row":"","coverage":"","cobra_participant":"","current_plan_enrolled":"","monthly_total_premium":""}}]
-}}
-
-PDF TEXT: {text}
-""",
-
-    "resourcing_uhc": """
-You are extracting data from a UnitedHealthcare (UHC) group insurance invoice PDF.
-
-Extract a SUMMARY and EMPLOYEES array based on the following rules.
-
-SUMMARY: company_name, invoice_number, invoice_date, coverage_period, customer_number, total_balance_due
-
-EMPLOYEES - one row per member. Extract from "Details" or "Current Detail" sections. Ignore "Summary" sections for employee data.
-  policy_id                 : The Policy ID for the member.
-  member_id                 : The Member ID for the individual.
-  first_name                : member first name
-  last_name                 : member last name
-  relationship_to_employee  : EE / SP / CH
-  coverage                  : Coverage code. Apply these mappings: E -> EE, ESC -> FAM.
-  current_plan_enrolled     : Full plan name. Capture multi-line descriptions.
-  current_premium           : Premium from "Current Detail" section.
-  adjustment_amount         : Premium from "Adjustment Detail" section.
-  data_row                  : sequential row number
-  gender                    : M or F
-  date_of_birth             : date of birth (4-digit year format)
-  home_zip_code             : member zip code
-  dependent_of_employee_row : data_row of their employee (blank if EE)
-  cobra_participant         : Y or N  (C = Cobra -> Y)
-
-CRITICAL RULES:
-1.  IDENTIFIERS: Extract `POLICYID` and `MEMBERID`. DO NOT extract Social Security Numbers (SSNs); if you see an SSN, output "NULL-SSN" for that field.
-2.  DATA SOURCE: Extract employee data ONLY from "Details" or "Current Detail" sections. Ignore "Summary" sections.
-3.  COVERAGE MAPPING: Convert coverage codes: 'E' becomes 'EE', 'ESC' becomes 'FAM'.
-4.  PLAN NAME: Capture the complete, multi-line plan name.
-5.  FINANCIALS: 
-    - Extract the grand total into the summary's 'total_balance_due'.
-    - For employees, map charges from "Current Detail" to 'current_premium'.
-    - Map charges from "Adjustment Detail" to 'adjustment_amount'.
-    - The field `monthly_total_premium` is replaced by `current_premium` and `adjustment_amount`.
-
-Use "" for missing values. Return ONLY valid JSON.
-
-{{
-  "summary": {{"company_name":"","invoice_number":"","invoice_date":"","coverage_period":"","customer_number":"","total_balance_due":""}},
-  "employees": [{{"policy_id":"","member_id":"","first_name":"","last_name":"","relationship_to_employee":"","coverage":"","current_plan_enrolled":"","current_premium":"","adjustment_amount":"","data_row":"","gender":"","date_of_birth":"","home_zip_code":"","dependent_of_employee_row":"","cobra_participant":""}}]
-}}
-
-PDF TEXT: {text}
-""",
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -388,18 +240,26 @@ def extract_text(pdf_path: Path, max_pages: int = 1000) -> str:
     return text
 
 
-def classify(text: str) -> str | None:
+def classify(text: str) -> str:
+    """Classifies the document as 'engage' (ADP) or 'generic'."""
     t = text.upper()
-    for sub_type in ["engage", "velocity", "prestige", "resourcing_kaiser", "resourcing_uhc"]:
-        if any(kw in t for kw in KEYWORDS[sub_type]):
-            return sub_type
-    return None
+    if any(kw in t for kw in KEYWORDS["engage"]):
+        return "engage"
+    print("[RPVE] No specific keywords matched. Using GENERIC extractor.")
+    return "generic"
 
 
-def extract_with_llm(text: str, ev_mode: bool = False) -> dict:
-    # Classification-free extraction: EV Mode alone drives the extraction rules.
-
-    prompt_template = """
+def extract_with_llm(sub_type: str, text: str, ev_mode: bool = False) -> dict:
+    """
+    Calls the LLM to extract structured summary and employee data.
+    Uses carrier-specific prompts if available, otherwise falls back to a standard prompt.
+    """
+    # 1. Determine which prompt to use
+    prompt_template = PROMPTS.get(sub_type)
+    
+    if not prompt_template:
+        # Fallback to the Standard / Generic Prompt
+        prompt_template = """
 You are a data extraction engine processing a group insurance invoice.
 
 🔹 CAPTURE ALL MEMBERS & ADJUSTMENTS (CRITICAL)
@@ -424,7 +284,13 @@ Do NOT extract random text near plan sections, headers, footers, or unrelated la
 🔹 DO NOT ABBREVIATE OR TRUNCATE PLAN NAMES (CRITICAL):
 The plan name MUST match the FULL string found in the "Plan" column of the PDF.
 
-🔹 OUTPUT FIELDS (12 fields per person)
+🔹 PAGE BREAK CONTINUATIONS (CRITICAL):
+Sometimes an employee's plan list spans across a page break. You will see their Name on page 1, followed by a page break and headers, and then their remaining plans on page 2 (often starting with "EE ID:xxx"). YOU MUST associate these orphaned plan lines on page 2 with the last named employee from the previous page. Do NOT create unnamed employee records.
+
+🔹 NAME FORMATTING (CRITICAL):
+Names are often printed as "LastName, FirstName" or "LastName, FirstName Middle" (e.g. "Smith, John Adam"). Properly identify and split the `last_name` and `first_name` without inverting them.
+
+🔹 OUTPUT FIELDS (13 fields per person)
 - full_name
 - first_name
 - middal_name (Middle Name)
@@ -433,17 +299,27 @@ The plan name MUST match the FULL string found in the "Plan" column of the PDF.
 - plan_name (FULL plan/product description — do NOT truncate)
 - plan_type (insurance category: Medical, Dental, Vision, etc.)
 - current_premium: The individual plan line cost for that specific plan row.
-- adjustment_amount: Any adjustment amount listed.
+- adjustment_amount: Any adjustment amount listed. (CRITICAL for UHC: If this is a UnitedHealthcare document and the "Adjustment Detail -> Amount" is empty or missing, you MUST map the value from the "Totals -> Total" column to this field).
 - birth_date
 - gender (M / F — infer if not present)
 - home_zip_code
+- billing_period: The start and end date of the billing cycle for the line item (e.g., "01/01/2024 - 01/31/2024").
 
 🔹 KEY RULES
-- One row per individual member.
+- One row per individual member (unless it is an ADP/Insperity invoice, in which case extract EVERY plan row so we can collapse them later).
 - Accuracy > Completeness. Return valid JSON only.
 - Do not hallucinate plan names.
 
-🔹 Coverage Recovery (FULL UHC MAPPING): Map coverage type codes using the following legend for ALL UHC documents:
+🔹 INSPERITY / MANIFEST MEDEX:
+- If column headers include "Coverage Type" and "Coverage Option", map "Coverage Type" -> `plan_type` and "Coverage Option" -> `plan_name`. Do not mix them up.
+
+🔹 WARWICK / DEDUCTION REGISTER:
+- If column headers include "Ded Code" or "Benefit Plan", map "Benefit Plan" to `plan_name` and "Ded Code" to `plan_type`.
+
+🔹 COVERAGE FALLBACK (e.g. BLUECROSS):
+- If the document lacks an explicit 'Coverage' column or it is blank, YOU MUST INFER the coverage tier from the relationship or enrollee type (e.g. 'EE', 'Subscriber' -> EE, 'SP', 'Spouse' -> ES).
+
+🔹 Coverage Recovery  : Map coverage type codes using the following legend for ALL UHC documents:
     - `E` or "Employee Only" → **EE**
     - `ES` or "Employee and Spouse" → **ES**
     - `ESC` or "Employee and Family" → **FAM**
@@ -459,10 +335,13 @@ The plan name MUST match the FULL string found in the "Plan" column of the PDF.
     - `E9D` or "Employee & Five or More Dependents" → **EC**
     - Single-letter codes only (when alone): `E` → **EE**, `S` → **ES**, `F` → **FAM**, `C` → **EC**, `E E` → **EE**
 
-{{
-  "summary": {{"company_name": "", "total_amount_due": ""}},
-  "employees": [{{"full_name": null, "first_name": null, "middal_name": null, "last_name": null, "coverage": null, "plan_name": null, "plan_type": null, "current_premium": null, "adjustment_amount": null, "birth_date": null, "gender": null, "home_zip_code": null}}]
-}}
+{
+  "summary": {"company_name": "", "total_amount_due": ""},
+  "employees": [{"full_name": null, "first_name": null, "middal_name": null, "last_name": null, "coverage": null, "plan_name": null, "plan_type": null, "current_premium": null, "adjustment_amount": null, "birth_date": null, "gender": null, "home_zip_code": null, "billing_period": null}]
+}
+
+🔹 SPECIAL CASE - PAYROLL / DEDUCTION REGISTERS (e.g. WARWICK):
+If column headers include "Pay Date", "Deduction Date", or "Check Date", you MUST extract this into the `billing_period` field for EVERY row. This is critical for differentiating recurring weekly/bi-weekly deductions.
 
 PDF TEXT: {{text}}
 """
@@ -471,14 +350,19 @@ PDF TEXT: {{text}}
     chunks = []
     current_chunk = []
     current_len = 0
-    
-    # Chunk by ~3,000 chars to avoid fatigue in EV OFF mode. 
-    # Small chunks ensure high precision for complex 14-field schemas.
+
+    # Use 7,500 char chunk size to stay within GPT-4o output token limits (4k tokens).
+    # A 15,000-40,000 char chunk could contain ~150-350 rows, which exceeds output limits.
+    CHUNK_MAX = 7500
+    OVERLAP   = 1000
+
     for line in lines:
-        if current_len + len(line) > 3000 and current_chunk:
+        if current_len + len(line) > CHUNK_MAX and current_chunk:
             chunks.append('\n'.join(current_chunk))
-            current_chunk = []
-            current_len = 0
+            # Carry the last OVERLAP chars of this chunk into the next one
+            overlap_text = '\n'.join(current_chunk)[-OVERLAP:]
+            current_chunk = [overlap_text]
+            current_len   = len(overlap_text)
         current_chunk.append(line)
         current_len += len(line) + 1
     if current_chunk:
@@ -487,8 +371,9 @@ PDF TEXT: {{text}}
     all_employees = []
     final_summary = {}
 
-    print(f"[RPVE] LLM extraction split into {len(chunks)} chunks...")
+    print(f"[RPVE] LLM extraction ({sub_type}) split into {len(chunks)} chunks...")
     for i, chunk in enumerate(chunks):
+        # Use simple string replacement for the placeholder
         prompt = prompt_template.replace("{text}", chunk)
         try:
             response = client.chat.completions.create(
@@ -559,7 +444,10 @@ def deduplicate_employees(employees: list[dict]) -> list[dict]:
             deduplicated_list.append(employee)
             continue
 
-        unique_key = (full_name.upper(), plan_name.upper())
+        premium = str(employee.get("current_premium") or "").strip()
+        adjustment = str(employee.get("adjustment_amount") or "").strip()
+        billing_period = str(employee.get("billing_period") or "").strip()
+        unique_key = (full_name.upper(), plan_name.upper(), premium, adjustment, billing_period)
         if unique_key not in seen:
             seen.add(unique_key)
             deduplicated_list.append(employee)
@@ -571,11 +459,12 @@ def deduplicate_employees(employees: list[dict]) -> list[dict]:
 
     return deduplicated_list
 
-def build_excel(data: dict, sub_type: str, stem: str, active_employee_fields: list[str] | None = None) -> Path:
+def build_excel(data: dict, sub_type: str, stem: str, active_employee_fields: list[str] | None = None, out_dir: Path | None = None) -> Path:
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
 
+    out = out_dir if out_dir is not None else OUTPUT_DIR
     wb        = Workbook()
     hex_col   = HEADER_COLOURS.get(sub_type, "1A1A2E")
     hdr_fill  = PatternFill("solid", fgColor=hex_col)
@@ -588,8 +477,7 @@ def build_excel(data: dict, sub_type: str, stem: str, active_employee_fields: li
     tfill     = PatternFill("solid", fgColor="F0F0F0")
 
     summary   = data.get("summary", {})
-    # Deduplicate employee records before writing to Excel
-    employees = deduplicate_employees(data.get("employees", []))
+    employees = data.get("employees", [])
 
     # ── Sheet 1: Employee Details ─────────────────────────────────────────────
     we = wb.active
@@ -621,8 +509,8 @@ def build_excel(data: dict, sub_type: str, stem: str, active_employee_fields: li
             if ri % 2 == 0:
                 c.fill = PatternFill("solid", fgColor="F7F7F7")
 
-    fin_cols = {"CURRENT_PREMIUM", "MONTHLY_TOTAL_PREMIUM", "GRAND_TOTAL", "TOTAL_COST"}
-    fin_present = [c for c in all_cols if c in fin_cols]
+    fin_cols = {"CURRENT_PREMIUM", "MONTHLY_TOTAL_PREMIUM", "GRAND_TOTAL", "TOTAL_COST", "ADJUSTMENT_AMOUNT"}
+    fin_present = [c for c in all_cols if c.upper() in fin_cols]
     if fin_present and employees:
         tr = len(employees) + 3
         we.row_dimensions[tr].height = 20
@@ -631,7 +519,7 @@ def build_excel(data: dict, sub_type: str, stem: str, active_employee_fields: li
         for ci, col in enumerate(all_cols, 1):
             c = we.cell(row=tr, column=ci)
             c.fill, c.border = tfill, bdr
-            if col in fin_cols:
+            if col.upper() in fin_cols:
                 total = 0.0
                 for emp in employees:
                     # Skip subtotal rows ("TOTAL" or empty plan_name) to avoid double counting
@@ -654,13 +542,14 @@ def build_excel(data: dict, sub_type: str, stem: str, active_employee_fields: li
     we.freeze_panes = "A3"
     wb.active = we
 
-    xlsx_path = OUTPUT_DIR / f"{stem}_RPVE_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    xlsx_path = out / f"{stem}_RPVE_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
     wb.save(str(xlsx_path))
     print(f"[RPVE] Excel -> {xlsx_path.name}")
     return xlsx_path
 
 
-def build_json_file(data: dict, sub_type: str, stem: str, active_employee_fields: list[str] | None = None) -> Path:
+def build_json_file(data: dict, sub_type: str, stem: str, active_employee_fields: list[str] | None = None, out_dir: Path | None = None) -> Path:
+    out = out_dir if out_dir is not None else OUTPUT_DIR
     summary   = data.get("summary", {})
     employees = data.get("employees", [])
     required  = active_employee_fields if active_employee_fields is not None else EMPLOYEE_FIELDS.get(sub_type, [])
@@ -674,7 +563,7 @@ def build_json_file(data: dict, sub_type: str, stem: str, active_employee_fields
         row["RPVE_SUB_TYPE"] = sub_type.upper()
         rows.append(row)
 
-    json_path = OUTPUT_DIR / f"{stem}_RPVE_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    json_path = out / f"{stem}_RPVE_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     with open(str(json_path), "w", encoding="utf-8") as f:
         json.dump(rows, f, indent=2, ensure_ascii=False)
     print(f"[RPVE] JSON  -> {json_path.name}")
@@ -729,6 +618,14 @@ async def extract(file: UploadFile = File(...)):
 
     safe = re.sub(r'[\\/:*?"<>|]', "_", file.filename)
     file_path = UPLOAD_DIR / safe
+    # Clean and truncate stem to avoid OS path length and character issues
+    stem = Path(safe).stem.replace(" ", "_").strip()[:50]
+    
+    # Create specific output directory
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    run_out_dir = OUTPUT_DIR / f"{stem}_{timestamp}"
+    run_out_dir.mkdir(parents=True, exist_ok=True)
+    
     with open(file_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
     print(f"\n[RPVE] Received -> {safe}")
@@ -738,7 +635,7 @@ async def extract(file: UploadFile = File(...)):
         text = universal_extract_text(file_path)
         
         # Consistent Text Output: Save the extracted text for ALL file types
-        txt_path = OUTPUT_DIR / f"{file_path.stem}.txt"
+        txt_path = run_out_dir / f"{stem}.txt"
         with open(txt_path, "w", encoding="utf-8") as f:
             f.write(text)
         print(f"[RPVE] Saved structured text to {txt_path.name}")
@@ -750,42 +647,83 @@ async def extract(file: UploadFile = File(...)):
     if not text.strip():
         raise HTTPException(422, "No text extracted. File may be empty or an unreadable image.")
 
-    # No AI classification — Standard Mode drives everything.
-    sub_type = "standard"
-    print(f"[RPVE] Mode -> Standard (sub_type={sub_type})")
+    # Use classification to determine carrier sub-type
+    sub_type = classify(text)
+    print(f"[RPVE] Classified as -> {sub_type.upper()}")
 
     try:
-        data = extract_with_llm(text)
+        data = extract_with_llm(sub_type, text)
     except Exception as e:
         raise HTTPException(500, f"LLM extraction failed: {str(e)}")
 
-    emp_count = len(data.get("employees", []))
+    # Clean up results: Remove rows without names (Center for Human Development fix)
+    all_emps = data.get("employees", [])
+    valid_emps = []
+    for e in all_emps:
+        # Require at least one name field to be present
+        fname = str(e.get("first_name") or "").strip()
+        lname = str(e.get("last_name") or "").strip()
+        fulln = str(e.get("full_name") or "").strip()
+        if (fname and lname) or fulln:
+            valid_emps.append(e)
+    data["employees"] = valid_emps
+    emp_count = len(valid_emps)
     print(f"[RPVE] Extracted  -> {emp_count} rows")
 
-    stem      = Path(safe).stem
-    
+    # ── Global FULL_NAME construction (applies to ALL file types) ─────────────
+    # If the LLM did not return a full_name, build it from first/middle/last.
+    for emp in data["employees"]:
+        if not str(emp.get("full_name") or "").strip():
+            parts = [
+                str(emp.get("first_name") or "").strip(),
+                str(emp.get("middal_name") or "").strip(),
+                str(emp.get("last_name") or "").strip(),
+            ]
+            emp["full_name"] = " ".join(p for p in parts if p)
+            
+        # ── Global Plan Name Fallback ─────────────────────────────────────────
+        # If the document lacks an explicit plan name and the LLM returns null
+        # (to strictly avoid hallucination), fall back to using the plan type.
+        if not str(emp.get("plan_name") or "").strip() and emp.get("plan_type"):
+            emp["plan_name"] = emp.get("plan_type")
+
+    # Deduplicate after all other processing, before output generation
+    data["employees"] = deduplicate_employees(data["employees"])
+
+    # billing_period is now a unified field and will be preserved for deduplication and output
+
+    # stem + run_out_dir already set above, do not reassign
+    analysis_file_name = None  # initialised here so it's always in scope
+
     try:
         # Determine the actual fields used for this extraction strictly by mode
-        active_fields = STANDARD_FIELDS
+        active_fields = EMPLOYEE_FIELDS.get(sub_type, UNIFIED_FIELDS)
 
         # ── ADP Post-Processing ───────────────────────────────────────
         # If the extracted text looks like an ADP invoice, collapse individual
         # plan rows per employee into one row (total premium + primary plan name)
-        # and filter out any employee whose total is <= $250.
+        # and filter out any employee whose total is <= $0.
         extracted_text_upper = text.upper()
-        is_adp = (
+        # "Manifest Medex" is an Insperity form, so include INSPERITY. 
+        # But ADP forms strictly apply the $250 filter.
+        is_strict_adp = (
             "TOTALSOURCE" in extracted_text_upper
             or "ADP" in extracted_text_upper
             or "NCT3-EPO" in extracted_text_upper
         )
-        if is_adp:
+        is_peo = is_strict_adp or "INSPERITY" in extracted_text_upper
+        
+        analysis_data = []
+
+        if is_peo:
             from collections import defaultdict
             grouped2: dict = defaultdict(list)
             for emp in data.get("employees", []):
                 # Initial skip based on names
                 pname = str(emp.get("plan_name") or "").strip().upper()
-                copt  = str(emp.get("plan_type") or "").strip().upper()
-                if any(x in pname or x in copt for x in ("TOTAL", "SUBTOTAL", "GRAND TOTAL")):
+                ptype = str(emp.get("plan_type") or "").strip().upper()
+                copt  = str(emp.get("coverage_option") or "").strip().upper()
+                if any(x in pname or x in ptype or x in copt for x in ("TOTAL", "SUBTOTAL", "GRAND TOTAL")):
                     continue
 
                 key = (
@@ -798,7 +736,7 @@ async def extract(file: UploadFile = File(...)):
             for (fname, lname), rows in grouped2.items():
                 if not rows: continue
                 
-                # Parse all premiums
+                # ── Parse all premiums FIRST then decide ─────────────────
                 parsed_rows = []
                 for r in rows:
                     val_str = str(r.get("current_premium") or "").replace("$", "").replace(",", "")
@@ -808,41 +746,89 @@ async def extract(file: UploadFile = File(...)):
                         v = 0.0
                     parsed_rows.append((v, r))
 
-                    # STRICT RULE: If one row's value is (roughly) the sum of others, it is a TOTAL row.
-                    # We sort by value descending to check the biggest one first.
-                    parsed_rows.sort(key=lambda x: x[0], reverse=True)
-                    
-                    valid_benefit_rows = []
-                    if len(parsed_rows) > 1:
-                        top_val, top_row = parsed_rows[0]
-                        remaining_sum = sum(v for v, r in parsed_rows[1:])
-                        # If the top value is very close to the sum of others, it's a Total row
-                        if abs(top_val - remaining_sum) < 0.1: # Allow 10 cent rounding diff
-                            print(f"[RPVE] Detected and removed TOTAL row for {fname} {lname}: {top_val}")
-                            valid_benefit_rows = parsed_rows[1:]
-                        else:
-                            valid_benefit_rows = parsed_rows
+                # ── AFTER collecting all rows: detect and strip TOTAL row ─
+                parsed_rows.sort(key=lambda x: x[0], reverse=True)
+
+                valid_benefit_rows = []
+                if len(parsed_rows) > 1:
+                    top_val, top_row = parsed_rows[0]
+                    remaining_sum = sum(v for v, _ in parsed_rows[1:])
+                    if abs(top_val - remaining_sum) < 0.1:
+                        print(f"[RPVE] Detected and removed TOTAL row for {fname} {lname}: {top_val}")
+                        valid_benefit_rows = parsed_rows[1:]
                     else:
                         valid_benefit_rows = parsed_rows
+                else:
+                    valid_benefit_rows = parsed_rows
 
-                    # Now pick the highest remaining benefit row
-                    if valid_benefit_rows:
-                        # Re-sort just in case
-                        valid_benefit_rows.sort(key=lambda x: x[0], reverse=True)
-                        best_val, best_row = valid_benefit_rows[0]
+                # ── Pick the single best (highest premium) row ────────────
+                if valid_benefit_rows:
+                    valid_benefit_rows.sort(key=lambda x: x[0], reverse=True)
+                    best_val, best_row = valid_benefit_rows[0]
 
-                        # Final check: is the plan name still suspiciously like a total?
-                        pname = str(best_row.get("plan_name") or "").strip().upper()
-                        if pname not in ("TOTAL", "SUBTOTAL"):
-                            # Filter: keep only if primary plan premium > $250
-                            if best_val > 250:
-                                collapsed.append(best_row)
+                    pname = str(best_row.get("plan_name") or "").strip().upper()
+                    if pname in ("TOTAL", "SUBTOTAL"):
+                        continue
+
+                    # ── FIX 1: PLAN_NAME — use coverage_option (full product
+                    #    name) as plan_name, and demote plan_name → plan_type
+                    cov_opt = str(best_row.get("coverage_option") or "").strip()
+                    cat_name = str(best_row.get("plan_name") or "").strip()
+                    if cov_opt and cov_opt.upper() not in ("TOTAL", "NONE", ""):
+                        best_row = dict(best_row)          # don't mutate original
+                        best_row["plan_name"] = cov_opt    # full product name
+                        if not best_row.get("plan_type"):
+                            best_row["plan_type"] = cat_name  # category → plan_type
+
+                    # ── FIX 2: FULL_NAME — build from parts if missing ────
+                    if not str(best_row.get("full_name") or "").strip():
+                        best_row = dict(best_row)
+                        parts = [
+                            str(best_row.get("first_name") or "").strip(),
+                            str(best_row.get("middal_name") or "").strip(),
+                            str(best_row.get("last_name") or "").strip(),
+                        ]
+                        best_row["full_name"] = " ".join(p for p in parts if p)
+
+                    collapsed.append(best_row)
 
             data["employees"] = collapsed
-            print(f"[RPVE] ADP Post-Processing: {len(collapsed)} employees kept (primary plan > $250)")
+            print(f"[RPVE] PEO Post-Processing: {len(collapsed)} employees after collapsing")
 
-        xlsx_path = build_excel(data, "generic", stem, active_employee_fields=active_fields)
-        json_path = build_json_file(data, "generic", stem, active_employee_fields=active_fields)
+        # ── Global < $250 Filter (Applies to all files EXCEPT UHC & Excel input) ───
+        is_uhc = "UNITEDHEALTHCARE" in extracted_text_upper or "UNITED HEALTHCARE" in extracted_text_upper
+        is_excel = ext in [".xlsx", ".xls"]
+        final_employees = []
+        for emp in data.get("employees", []):
+            val_str = str(emp.get("current_premium") or "").replace("$", "").replace(",", "")
+            try:
+                premium_val = round(float(re.sub(r'[^\d.-]', '', val_str)), 2)
+            except:
+                premium_val = 0.0
+
+            if premium_val < 250 and not is_uhc and not is_excel:
+                analysis_data.append(emp)
+            else:
+                final_employees.append(emp)
+                
+        data["employees"] = final_employees
+        print(f"[RPVE] Global Filter: {len(final_employees)} kept, {len(analysis_data)} moved to analysis (UHC/Excel Exempt: {is_uhc or is_excel}).")
+
+
+        # Build regular outputs (saved into the per-file subfolder)
+        xlsx_path = build_excel(data, sub_type, stem, active_employee_fields=active_fields, out_dir=run_out_dir)
+        json_path = build_json_file(data, sub_type, stem, active_employee_fields=active_fields, out_dir=run_out_dir)
+        print(f"[RPVE] Output folder -> {run_out_dir}")
+
+        # Build analysis file if there's any ADP < $250 data
+        if analysis_data:
+            analysis_path = run_out_dir / f"{stem}_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            with open(str(analysis_path), "w", encoding="utf-8") as af:
+                json.dump(analysis_data, af, indent=2, ensure_ascii=False)
+            analysis_file_name = analysis_path.name
+            _cache[analysis_file_name] = str(analysis_path)
+            print(f"[RPVE] Saved {len(analysis_data)} below-threshold ADP rows to {analysis_file_name}")
+
     except Exception as build_err:
         import traceback
         print(f"[RPVE] Output building error:\n{traceback.format_exc()}")
@@ -883,6 +869,8 @@ async def extract(file: UploadFile = File(...)):
         "total_value":    numeric_total,
         "excel_url":      f"/api/download/{xlsx_path.name}",
         "json_url":       f"/api/download/{json_path.name}",
+        "analysis_file":  analysis_file_name,
+        "analysis_url":   f"/api/download/{analysis_file_name}" if analysis_file_name else None,
         "employees":      [
             {col: emp.get(col.lower(), "") for col in active_fields}
             for emp in data.get("employees", [])
