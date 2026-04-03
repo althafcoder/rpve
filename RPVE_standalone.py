@@ -138,6 +138,51 @@ PDF TEXT: {text}
     # All other prompts are removed. The generic prompt is now the main fallback
     # in the `extract_with_llm` function itself.
 
+    "excel": """
+You are a data extraction engine processing a group insurance invoice from an Excel file.
+
+- CAPTURE ALL MEMBERS & ADJUSTMENTS (CRITICAL)
+This Excel file may list members in a ROSTER format where each row is a separate individual (Subscriber, Spouse, Dependent).
+You MUST extract EVERY person listed in ANY section:
+  - CURRENT DETAIL section
+  - RETRO DETAIL section
+  - ADJUSTMENT DETAIL section
+  - Any other detail section in the document
+
+- NEGATIVE VALUES (CRITICAL):
+  - If a value is negative (e.g. $-100.00), you MUST preserve the minus sign in the current_premium or adjustment_amount field.
+
+- OUTPUT FIELDS (13 fields per person)
+- full_name
+- first_name
+- middal_name (Middle Name)
+- last_name
+- coverage (e.g. ES / EC / FAM / EE / SP / CH)
+- plan_name (FULL plan/product description — do NOT truncate)
+- plan_type (insurance category: Medical, Dental, Vision, etc.)
+- current_premium: The individual plan line cost for that specific plan row.
+- adjustment_amount: Any adjustment amount listed.
+- birth_date
+- gender (M / F — infer if not present)
+- home_zip_code
+- billing_period: The start and end date of the billing cycle for the line item (e.g., "01/01/2024 - 01/31/2024").
+
+- KEY RULES
+- EACH ROW IS A UNIQUE RECORD: Every single row in the Excel data represents a separate record. You MUST create a distinct JSON object for each row. Do not group or summarize rows, even for the same person.
+- PAYROLL DATES: If columns like "Pay Date", "Deduction Date", or "Check Date" exist, you MUST capture this date in the `billing_period` field for every single row. This is critical for differentiating weekly or bi-weekly deductions.
+- EXTRACT ALL LINES: Create one output record for every plan/benefit line for every individual. If a person has multiple insurance products (e.g., Medical, Dental, Vision), create a separate record for EACH line. Extract EVERY line, even if premium or adjustment amounts are zero or blank.
+- Accuracy > Completeness. Return valid JSON only.
+- Do not hallucinate plan names.
+
+{{
+  "summary": {{"company_name": "", "total_amount_due": ""}},
+  "employees": [{{"full_name": null, "first_name": null, "middal_name": null, "last_name": null, "coverage": null, "plan_name": null, "plan_type": null, "current_premium": null, "adjustment_amount": null, "birth_date": null, "gender": null, "home_zip_code": null, "billing_period": null}}]
+}}
+
+EXCEL TEXT: {{text}}
+""",
+
+
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -249,7 +294,7 @@ def classify(text: str) -> str:
     return "generic"
 
 
-def extract_with_llm(sub_type: str, text: str, ev_mode: bool = False) -> dict:
+def extract_with_llm(sub_type: str, text: str, file_ext: str, ev_mode: bool = False) -> dict:
     """
     Calls the LLM to extract structured summary and employee data.
     Uses carrier-specific prompts if available, otherwise falls back to a standard prompt.
@@ -297,7 +342,7 @@ Names are often printed as "LastName, FirstName" or "LastName, FirstName Middle"
 - last_name
 - coverage (e.g. ES / EC / FAM / EE / SP / CH)
 - plan_name (FULL plan/product description — do NOT truncate)
-- plan_type (insurance category: Medical, Dental, Vision, etc.)
+- plan_type (insurance category: Medical, Dental, Vision, etc.) its also the column name under provider header 
 - current_premium: The individual plan line cost for that specific plan row.
 - adjustment_amount: Any adjustment amount listed. (CRITICAL for UHC: If this is a UnitedHealthcare document and the "Adjustment Detail -> Amount" is empty or missing, you MUST map the value from the "Totals -> Total" column to this field).
 - birth_date
@@ -306,7 +351,7 @@ Names are often printed as "LastName, FirstName" or "LastName, FirstName Middle"
 - billing_period: The start and end date of the billing cycle for the line item (e.g., "01/01/2024 - 01/31/2024").
 
 🔹 KEY RULES
-- One row per individual member (unless it is an ADP/Insperity invoice, in which case extract EVERY plan row so we can collapse them later).
+- One row per plan/benefit line per individual member. Extract EVERY line found in the document, even if the current_premium or adjustment_amount is blank or zero.
 - Accuracy > Completeness. Return valid JSON only.
 - Do not hallucinate plan names.
 
@@ -340,6 +385,14 @@ Names are often printed as "LastName, FirstName" or "LastName, FirstName Middle"
   "employees": [{"full_name": null, "first_name": null, "middal_name": null, "last_name": null, "coverage": null, "plan_name": null, "plan_type": null, "current_premium": null, "adjustment_amount": null, "birth_date": null, "gender": null, "home_zip_code": null, "billing_period": null}]
 }
 
+🔹 PLAN NAME WRAPPING (CRITICAL):
+In many invoices (especially UnitedHealthcare/UHC), the `plan_name` often wraps onto 1-3 additional lines immediately below the primary employee row. You MUST capture and concatenate all lines of the plan description into a single `plan_name` string. Look at the lines following the name to find the rest of the plan description.
+Example:
+Row: HOFF, GARY      TN S HRTG + NG     *******5900 E A $665.45
+Next Line:           55/125/6500/100 POS 25
+Next Line:           DZLE
+Capture as: "TN S HRTG + NG 55/125/6500/100 POS 25 DZLE"
+
 🔹 SPECIAL CASE - PAYROLL / DEDUCTION REGISTERS (e.g. WARWICK):
 If column headers include "Pay Date", "Deduction Date", or "Check Date", you MUST extract this into the `billing_period` field for EVERY row. This is critical for differentiating recurring weekly/bi-weekly deductions.
 
@@ -351,10 +404,13 @@ PDF TEXT: {{text}}
     current_chunk = []
     current_len = 0
 
-    # Use 7,500 char chunk size to stay within GPT-4o output token limits (4k tokens).
-    # A 15,000-40,000 char chunk could contain ~150-350 rows, which exceeds output limits.
-    CHUNK_MAX = 7500
-    OVERLAP   = 1000
+    # Dynamically set chunk size based on file type
+    if file_ext in [".xlsx", ".xls"]:
+        CHUNK_MAX = 8000
+        OVERLAP   = 1000
+    else: # For PDFs and other file types
+        CHUNK_MAX = 40000
+        OVERLAP   = 4000
 
     for line in lines:
         if current_len + len(line) > CHUNK_MAX and current_chunk:
@@ -459,7 +515,7 @@ def deduplicate_employees(employees: list[dict]) -> list[dict]:
 
     return deduplicated_list
 
-def build_excel(data: dict, sub_type: str, stem: str, active_employee_fields: list[str] | None = None, out_dir: Path | None = None) -> Path:
+def build_excel(data: dict, sub_type: str, stem: str, active_employee_fields: list[str] | None = None, out_dir: Path | None = None, include_filters: bool = True) -> Path:
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
@@ -539,10 +595,14 @@ def build_excel(data: dict, sub_type: str, stem: str, active_employee_fields: li
                 c.value = f"${total:,.2f}"
                 c.font  = tf
 
+    if include_filters and employees:
+        we.auto_filter.ref = f"A2:{get_column_letter(len(all_cols))}{len(employees) + 2}"
+
     we.freeze_panes = "A3"
     wb.active = we
 
-    xlsx_path = out / f"{stem}_RPVE_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    filter_suffix = "_filtered" if include_filters else "_unfiltered"
+    xlsx_path = out / f"{stem}_RPVE_{datetime.now().strftime('%Y%m%d_%H%M%S')}{filter_suffix}.xlsx"
     wb.save(str(xlsx_path))
     print(f"[RPVE] Excel -> {xlsx_path.name}")
     return xlsx_path
@@ -648,11 +708,14 @@ async def extract(file: UploadFile = File(...)):
         raise HTTPException(422, "No text extracted. File may be empty or an unreadable image.")
 
     # Use classification to determine carrier sub-type
-    sub_type = classify(text)
+    if ext in [".xlsx", ".xls"]:
+        sub_type = "excel"
+    else:
+        sub_type = classify(text)
     print(f"[RPVE] Classified as -> {sub_type.upper()}")
 
     try:
-        data = extract_with_llm(sub_type, text)
+        data = extract_with_llm(sub_type, text, ext)
     except Exception as e:
         raise HTTPException(500, f"LLM extraction failed: {str(e)}")
 
@@ -690,6 +753,14 @@ async def extract(file: UploadFile = File(...)):
     # Deduplicate after all other processing, before output generation
     data["employees"] = deduplicate_employees(data["employees"])
 
+    # ── BRANCH: CAPTURE UNFILTERED DATA (BEFORE COLLAPSING) ─────────────
+    # This ensures the "unfiltered" Excel contains EVERY single line item
+    # extracted, including Dental, Vision, etc. for every person.
+    data_unfiltered = {
+        "summary": data.get("summary", {}),
+        "employees": [dict(e) for e in data.get("employees", [])]
+    }
+
     # billing_period is now a unified field and will be preserved for deduplication and output
 
     # stem + run_out_dir already set above, do not reassign
@@ -715,7 +786,7 @@ async def extract(file: UploadFile = File(...)):
         
         analysis_data = []
 
-        if is_peo:
+        if is_peo and not (ext in [".xlsx", ".xls"]):
             from collections import defaultdict
             grouped2: dict = defaultdict(list)
             for emp in data.get("employees", []):
@@ -799,6 +870,7 @@ async def extract(file: UploadFile = File(...)):
         is_uhc = "UNITEDHEALTHCARE" in extracted_text_upper or "UNITED HEALTHCARE" in extracted_text_upper
         is_excel = ext in [".xlsx", ".xls"]
         final_employees = []
+        
         for emp in data.get("employees", []):
             val_str = str(emp.get("current_premium") or "").replace("$", "").replace(",", "")
             try:
@@ -811,12 +883,22 @@ async def extract(file: UploadFile = File(...)):
             else:
                 final_employees.append(emp)
                 
-        data["employees"] = final_employees
-        print(f"[RPVE] Global Filter: {len(final_employees)} kept, {len(analysis_data)} moved to analysis (UHC/Excel Exempt: {is_uhc or is_excel}).")
-
+        data_filtered = {
+            "summary": data.get("summary", {}),
+            "employees": final_employees
+        }
+        
+        print(f"[RPVE] Global Filter: {len(final_employees)} kept for Filtered Excel, {len(analysis_data)} moved to analysis (UHC/Excel Exempt: {is_uhc or is_excel}).")
 
         # Build regular outputs (saved into the per-file subfolder)
-        xlsx_path = build_excel(data, sub_type, stem, active_employee_fields=active_fields, out_dir=run_out_dir)
+        # 1. Filtered Excel: Collapsed rows + Only records passing threshold + autofilters
+        xlsx_path = build_excel(data_filtered, sub_type, stem, active_employee_fields=active_fields, out_dir=run_out_dir, include_filters=True)
+        
+        # 2. Unfiltered Excel: EVERY raw extracted line item regardless of threshold or collapsing
+        xlsx_path_unfiltered = build_excel(data_unfiltered, sub_type, stem, active_employee_fields=active_fields, out_dir=run_out_dir, include_filters=False)
+        
+        # Use the filtered data for the main JSON and response
+        data = data_filtered
         json_path = build_json_file(data, sub_type, stem, active_employee_fields=active_fields, out_dir=run_out_dir)
         print(f"[RPVE] Output folder -> {run_out_dir}")
 

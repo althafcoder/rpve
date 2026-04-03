@@ -50,33 +50,16 @@ const ResultsPanel = ({ document }: ResultsPanelProps) => {
     URL.revokeObjectURL(url);
   };
 
-  const handleDownloadCsv = () => {
-    if (!result?.claims || !Array.isArray(result.claims)) return;
+  const handleDownloadFilteredExcel = () => {
+    if (document?.result?.download_url_filtered) {
+      window.open(document.result.download_url_filtered, "_blank");
+    }
+  };
 
-    const claims = result.claims;
-    if (claims.length === 0) return;
-
-    // Get all unique keys for headers
-    const headers = Array.from(new Set(claims.flatMap(c => Object.keys(c))));
-
-    const csvRows = [
-      headers.join(','),
-      ...claims.map(row =>
-        headers.map(header => {
-          const val = row[header];
-          const escaped = ('' + (val ?? '')).replace(/"/g, '""');
-          return `"${escaped}"`;
-        }).join(',')
-      )
-    ];
-
-    const blob = new Blob([csvRows.join('\n')], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const a = globalThis.document.createElement("a");
-    a.href = url;
-    a.download = `${document.name.replace(".pdf", "")}_extracted.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+  const handleDownloadUnfilteredExcel = () => {
+    if (document?.result?.download_url_unfiltered) {
+      window.open(document.result.download_url_unfiltered, "_blank");
+    }
   };
 
   return (
@@ -112,9 +95,13 @@ const ResultsPanel = ({ document }: ResultsPanelProps) => {
           <FileJson className="w-4 h-4 mr-2" />
           Download JSON
         </Button>
-        <Button size="sm" variant="outline" onClick={handleDownloadCsv}>
+        <Button size="sm" variant="outline" onClick={handleDownloadFilteredExcel}>
           <Download className="w-4 h-4 mr-2" />
-          Download CSV
+          Download Filtered Excel
+        </Button>
+        <Button size="sm" variant="outline" onClick={handleDownloadUnfilteredExcel}>
+          <Download className="w-4 h-4 mr-2" />
+          Download Unfiltered Excel
         </Button>
       </div>
 
