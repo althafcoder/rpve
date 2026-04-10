@@ -68,14 +68,15 @@ UNIFIED_FIELDS = [
 
 # The employee fields dictionary now only distinguishes between ADP and generic.
 EMPLOYEE_FIELDS = {
-    "engage":  UNIFIED_FIELDS,
-    "generic": UNIFIED_FIELDS,
+    "engage":       UNIFIED_FIELDS,
+    "generic":      UNIFIED_FIELDS,
+    "datalink_emi": UNIFIED_FIELDS,   # Data Link EMI uses the same unified schema
 }
 
 # Simplified summary fields. The generic prompt will attempt to find these.
 SUMMARY_FIELDS = {
-    "engage":  ["COMPANY_NAME", "INVOICE_NUMBER", "BILLING_DATE", "DUE_DATE", "REFERENCE_NUMBER", "TOTAL_COST"],
-    "generic": ["COMPANY_NAME", "INVOICE_NUMBER", "BILLING_DATE", "DUE_DATE", "TOTAL_AMOUNT_DUE"],
+    "engage":  ["COMPANY_NAME", "INVOICE_NUMBER", "BILLING_DATE", "DUE_DATE", "REFERENCE_NUMBER"],
+    "generic": ["COMPANY_NAME", "INVOICE_NUMBER", "BILLING_DATE", "DUE_DATE"],
 }
 
 SUB_TYPE_LABELS = {
@@ -94,7 +95,9 @@ HEADER_COLOURS = {
 
 # Simplified to only identify ADP ("engage") documents.
 KEYWORDS = {
-    "engage": ["TOTALSOURCE", "TOTALSOURCE BENEFITS INVOICE", "TOTALSOURCE® BENEFITS INVOICE", "NCT3-EPO"],
+    "engage": ["TOTALSOURCE", "TOTALSOURCE BENEFITS INVOICE", "TOTALSOURCE® BENEFITS INVOICE", "NCT3-EPO", "ADP", "ADP, INC"],
+    # Data Link EMI carrier
+    "datalink_emi": ["DATA LINK EMI", "DATALINK EMI", "DATALINKEMI"],
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -108,7 +111,7 @@ You are extracting data from an ADP TotalSource Benefits Invoice PDF.
 
 Extract a SUMMARY and EMPLOYEES array.
 
-SUMMARY: company_name, invoice_number, billing_date, due_date, reference_number, total_cost
+SUMMARY: company_name, invoice_number, billing_date, due_date, reference_number
 
 EMP_LIST = [{"first_name":"","last_name":"","coverage":"","plan_name":"","coverage_option":"","current_premium":""}]
   employees - one row per plan line per employee, PLUS a subtotal row for each employee:
@@ -124,11 +127,12 @@ Rules:
 2. SUBTOTAL ROW: After all plan lines for an employee, add ONE subtotal row:
    - coverage_option: (Set to exactly "TOTAL")
    - current_premium: the sub-total amount for that specific employee.
-3. Each person must be represented by their individual plan rows, followed by their "TOTAL" subtotal row.
+3. PAGE BREAK CONTINUATIONS (CRITICAL): Sometimes an employee's plan list spans across a page break. You will see their Name on page 1, followed by a page break and headers, and then their remaining plans on page 2 (often starting with "EE ID:xxx"). YOU MUST associate these orphaned plan lines on page 2 with the last named employee from the previous page. Do NOT create unnamed employee records.
+4. Each person must be represented by their individual plan rows, followed by their "TOTAL" subtotal row.
 Use "" for missing values. Return ONLY valid JSON.
 
 {{
-  "summary": {{"company_name":"","invoice_number":"","billing_date":"","due_date":"","reference_number":"","total_cost":""}},
+  "summary": {{"company_name":"","invoice_number":"","billing_date":"","due_date":"","reference_number":""}},
   "employees": [{{"first_name":"","last_name":"","coverage":"","plan_name":"","coverage_option":"","current_premium":""}}]
 }}
 
@@ -237,16 +241,140 @@ def extract_text(pdf_path: Path, max_pages: int = 1000) -> str:
     except Exception as e:
         print(f"[RPVE] Global extraction error: {e}")
 
+    extracted_upper = text.upper()
+    text_quality_score = assess_text_quality(text)
+    
+    # Trigger rostaing if:
+    # 1. Text is empty, OR
+    # 2. Keywords missing, OR
+    # 3. Text quality is too low (high corruption) - threshold 0.55
+    if (not text.strip() 
+        or not any(kw in extracted_upper for kw in VALID_KEYWORDS)
+        or text_quality_score < 0.55):
+        
+        reason = ""
+        if not text.strip():
+            reason = "text is empty"
+        elif not any(kw in extracted_upper for kw in VALID_KEYWORDS):
+            reason = f"keywords not found (quality: {text_quality_score:.2f})"
+        else:
+            reason = f"text quality too low ({text_quality_score:.2f} < 0.55 threshold)"
+        
+        print(f"[RPVE] Triggering rostaing-ocr fallback: {reason}")
+        rostaing_text = extract_text_with_rostaing(pdf_path)
+        if rostaing_text and rostaing_text.strip():
+            return rostaing_text
+
     return text
+
+
+def assess_text_quality(text: str) -> float:
+    """
+    Score text quality (0.0 to 1.0) to detect OCR corruption.
+    Low score = high corruption (garbled chars, broken tables, fragmentation).
+    """
+    if not text or len(text) < 50:
+        return 0.0
+    
+    lines = text.split('\n')
+    line_count = len(lines)
+    
+    # 1. Check for garbled/non-ASCII characters (corruption indicator)
+    garbled_count = 0
+    for char in text:
+        if ord(char) > 127 and char not in 'àáâãäåèéêëìíîïòóôõöùúûüýÿªºñ—–':
+            garbled_count += 1
+    
+    garbled_ratio = garbled_count / len(text) if len(text) > 0 else 0
+    
+    # 2. Check for repeated fragmented lines (broken table markers)
+    fragment_pattern = r'\s*\|\s*|\s+\[.{1,3}\]\s+'
+    fragment_count = len(re.findall(fragment_pattern, text))
+    fragment_ratio = fragment_count / max(line_count, 1)
+    
+    # 3. Check for very short lines (fragmentation sign)
+    short_lines = sum(1 for line in lines if len(line.strip()) < 5 and line.strip())
+    short_line_ratio = short_lines / max(line_count, 1) if line_count > 0 else 0
+    
+    # 4. Check for repeated consecutive lines (OCR duplication artifact)
+    duplicate_lines = 0
+    for i in range(1, len(lines)):
+        if lines[i].strip() and lines[i-1].strip() and lines[i].strip() == lines[i-1].strip():
+            duplicate_lines += 1
+    
+    duplicate_ratio = duplicate_lines / max(line_count - 1, 1)
+    
+    # Weighted quality score
+    quality = 1.0
+    quality -= min(0.3, garbled_ratio * 3)        # Up to 30% penalty for non-ASCII
+    quality -= min(0.4, fragment_ratio * 3)       # Up to 40% penalty for fragments (increased weight)
+    quality -= min(0.25, short_line_ratio * 2)    # Up to 25% penalty for short lines
+    quality -= min(0.25, duplicate_ratio * 2)     # Up to 25% penalty for duplicates
+    
+    quality = max(0.0, min(1.0, quality))
+    print(f"[RPVE] Text quality assessment: {quality:.2f} (garbled: {garbled_ratio:.2%}, fragments: {fragment_ratio:.2%}, short_lines: {short_line_ratio:.2%}, duplicates: {duplicate_ratio:.2%})")
+    
+    return quality
+
+
+def extract_text_with_rostaing(pdf_path: Path) -> str:
+    """Fallback PDF text extraction using rostaing-ocr when the standard path is noisy."""
+    try:
+        from schema_ocr import SchemaOCRExtractor
+    except Exception as e:
+        print(f"[RPVE] Could not import schema_ocr for rostaing fallback: {e}")
+        return ""
+
+    if shutil.which("tesseract") is None:
+        print("[RPVE] Tesseract not found in PATH. rostaing-ocr may still work, but OCR accuracy could be reduced.")
+
+    try:
+        extractor = SchemaOCRExtractor(pdf_path)
+        text = extractor.extract_layout_text(save_debug_output=True)
+        if text and text.strip():
+            print(f"[RPVE] Rostaing OCR fallback produced {len(text.splitlines())} lines of text.")
+            return text
+        print("[RPVE] Rostaing OCR fallback returned empty text.")
+    except Exception as e:
+        print(f"[RPVE] Rostaing OCR fallback failed: {e}")
+
+    return ""
 
 
 def classify(text: str) -> str:
     """Classifies the document as 'engage' (ADP) or 'generic'."""
     t = text.upper()
-    if any(kw in t for kw in KEYWORDS["engage"]):
-        return "engage"
+    for sub_type, kwlist in KEYWORDS.items():
+        if any(kw in t for kw in kwlist):
+            return sub_type
     print("[RPVE] No specific keywords matched. Using GENERIC extractor.")
     return "generic"
+
+
+def clean_invoice_text(text: str) -> str:
+    """
+    Cleans the extracted invoice text by removing headers, footers, and other noise
+    that can disrupt the LLM's parsing of continuous employee data.
+    """
+    lines = text.split('\n')
+    cleaned_lines = []
+    
+    # Regex to detect page footers, headers, and copyright notices
+    header_footer_pattern = re.compile(r"""
+        ^\s*page\s+\d+\s+of\s+\d+\s*$|
+        copyright\s+©\s+.*adp,\s+inc|
+        ^\s*Name\s+Provider\s+Plan\s+Coverage\s+Type\s+Month\s+Cost\s*$
+    """, re.IGNORECASE | re.VERBOSE)
+
+    for line in lines:
+        # If the line doesn't match the pattern, keep it
+        if not header_footer_pattern.search(line):
+            cleaned_lines.append(line)
+            
+    # Rejoin the lines
+    cleaned_text = '\n'.join(cleaned_lines)
+    
+    return cleaned_text
 
 
 def extract_with_llm(sub_type: str, text: str, ev_mode: bool = False) -> dict:
@@ -254,6 +382,9 @@ def extract_with_llm(sub_type: str, text: str, ev_mode: bool = False) -> dict:
     Calls the LLM to extract structured summary and employee data.
     Uses carrier-specific prompts if available, otherwise falls back to a standard prompt.
     """
+    # Clean the text to handle multi-page table fragmentation
+    text = clean_invoice_text(text)
+
     # 1. Determine which prompt to use
     prompt_template = PROMPTS.get(sub_type)
     
@@ -299,7 +430,7 @@ Names are often printed as "LastName, FirstName" or "LastName, FirstName Middle"
 - plan_name (FULL plan/product description — do NOT truncate)
 - plan_type (insurance category: Medical, Dental, Vision, etc.)
 - current_premium: The individual plan line cost for that specific plan row.
-- adjustment_amount: Any adjustment amount listed. (CRITICAL for UHC: If this is a UnitedHealthcare document and the "Adjustment Detail -> Amount" is empty or missing, you MUST map the value from the "Totals -> Total" column to this field).
+- adjustment_amount: Any adjustment amount listed.(CRITICAL for UHC: If this is a UnitedHealthcare document and the "Adjustment Detail -> Amount" is empty or missing, you MUST map the value from the "Totals -> Total" column to this field).
 - birth_date
 - gender (M / F — infer if not present)
 - home_zip_code
@@ -315,6 +446,23 @@ Names are often printed as "LastName, FirstName" or "LastName, FirstName Middle"
 
 🔹 WARWICK / DEDUCTION REGISTER:
 - If column headers include "Ded Code" or "Benefit Plan", map "Benefit Plan" to `plan_name` and "Ded Code" to `plan_type`.
+
+🔹 KARPEN_STEEL_PRODUCTS:
+- For this carrier, you MUST map the value from the "Total Premium" column to `adjustment_amount`.
+
+🔹"DATA LINK EMI", "DATALINK EMI", "DATALINKEMI" :
+- **CRITICAL: EXTRACT ONLY THE "Medical" COLUMN VALUE. ALL OTHER COLUMNS ARE FORBIDDEN.**
+- FORBIDDEN columns (never extract these): "Total Due", "Dental", "Vision", "Garner HRA". Ignore them completely.
+- For REGULAR rows (current billing):
+    - `current_premium` = value from "Medical" column ONLY (e.g. $334.78, $0.00).
+    - `adjustment_amount` = null.
+- For RETRO ACTIVE ADJUSTMENT rows (negative values / retroactive section):
+    - `current_premium` = null.
+    - `adjustment_amount` = value from "Medical" column ONLY (e.g. $-334.78).
+- If a member has Medical=$0.00, then current_premium MUST be "$0.00" — do NOT substitute Dental or Vision or Total Due.
+- Example: Medical=$0.00, Dental=$58.10, Vision=$0.00, Total Due=$58.10 → current_premium="$0.00" ✅ NOT "$58.10" ❌
+- Example: Medical=$334.78, Dental=$27.90, Vision=$7.70, Total Due=$412.38 → current_premium="$334.78" ✅ NOT "$412.38" ❌
+- **If you return Total Due, Dental, Vision, or Garner HRA in any field, you have failed the task.**
 
 🔹 COVERAGE FALLBACK (e.g. BLUECROSS):
 - If the document lacks an explicit 'Coverage' column or it is blank, YOU MUST INFER the coverage tier from the relationship or enrollee type (e.g. 'EE', 'Subscriber' -> EE, 'SP', 'Spouse' -> ES).
@@ -353,8 +501,8 @@ PDF TEXT: {{text}}
 
     # Use 7,500 char chunk size to stay within GPT-4o output token limits (4k tokens).
     # A 15,000-40,000 char chunk could contain ~150-350 rows, which exceeds output limits.
-    CHUNK_MAX = 7500
-    OVERLAP   = 1000
+    CHUNK_MAX = 40000
+    OVERLAP   = 4000
 
     for line in lines:
         if current_len + len(line) > CHUNK_MAX and current_chunk:
@@ -647,8 +795,16 @@ async def extract(file: UploadFile = File(...)):
     if not text.strip():
         raise HTTPException(422, "No text extracted. File may be empty or an unreadable image.")
 
-    # Use classification to determine carrier sub-type
-    sub_type = classify(text)
+    # ---- Filename-based fallback for Data Link EMI ----
+    # Normalise filename: replace underscores/hyphens with spaces so that
+    # "Data_Link_EMI_Invoice..." and "Data-Link-EMI..." both match correctly.
+    safe_normalised = safe.upper().replace("_", " ").replace("-", " ")
+    if "DATA LINK EMI" in safe_normalised:
+        sub_type = "datalink_emi"
+        print(f"[RPVE] Filename -> Data Link EMI detected, forcing sub_type. (key: {safe_normalised[:40]})")
+    else:
+        # Use classification to determine carrier sub-type
+        sub_type = classify(text)
     print(f"[RPVE] Classified as -> {sub_type.upper()}")
 
     try:
@@ -686,6 +842,86 @@ async def extract(file: UploadFile = File(...)):
         # (to strictly avoid hallucination), fall back to using the plan type.
         if not str(emp.get("plan_name") or "").strip() and emp.get("plan_type"):
             emp["plan_name"] = emp.get("plan_type")
+
+    # ── Post-LLM clean-up for Data Link EMI ─────────────────────────────────
+    # CRITICAL ENFORCEMENT: Even if the LLM ignored the prompt rule and returned
+    # Total Due / Dental / Vision instead of Medical, we catch and fix it here
+    # by re-parsing the PDF table with pdfplumber directly.
+    if sub_type == "datalink_emi":
+        # Build a lookup: last_name -> medical value, directly from the PDF table
+        medical_lookup: dict[str, str] = {}          # key = LASTNAME_FIRSTNAME upper
+        retro_lookup:   dict[str, str] = {}          # key = LASTNAME_FIRSTNAME upper
+        try:
+            import pdfplumber
+            with pdfplumber.open(str(file_path)) as _pdf:
+                for _page in _pdf.pages:
+                    _tables = _page.extract_tables()
+                    for _tbl in _tables:
+                        for _row in _tbl:
+                            if not _row or len(_row) < 5:
+                                continue
+                            # EMI table layout: ID | Name | Status | Medical | Garner HRA | Dental | Vision | Total Due
+                            # OR retro:         ID | Name | Coverage Dates | Status | Medical | Garner HRA | Dental | Vision | Total Due
+                            _name_cell = str(_row[1] or "").strip()
+                            if not _name_cell or _name_cell.lower() in ("name", ""):
+                                continue
+
+                            # Detect retro rows (have coverage dates col)
+                            _is_retro = False
+                            _medical_idx = 3   # default: col 3 = Medical
+                            if len(_row) >= 9:
+                                # retro layout has one extra column (Coverage Dates)
+                                _date_cell = str(_row[2] or "")
+                                if "/" in _date_cell or "-" in _date_cell:
+                                    _is_retro = True
+                                    _medical_idx = 4
+
+                            _medical_val = str(_row[_medical_idx] or "").strip()
+                            # Validate: should look like a dollar amount
+                            if not re.match(r'^\$?-?[\d,]+\.\d{2}$', _medical_val.replace("(", "").replace(")", "")):
+                                continue
+
+                            # Normalise name to key
+                            _key = re.sub(r'\s+', ' ', _name_cell.upper().replace(",", "")).strip()
+                            if _is_retro:
+                                retro_lookup[_key] = _medical_val
+                            else:
+                                medical_lookup[_key] = _medical_val
+
+            print(f"[RPVE] Data Link EMI: built medical_lookup with {len(medical_lookup)} rows, retro_lookup with {len(retro_lookup)} rows.")
+        except Exception as _lookup_err:
+            print(f"[RPVE] Data Link EMI: pdfplumber lookup failed ({_lookup_err}), skipping enforcement.")
+
+        def _emi_key(emp: dict) -> str:
+            """Build lookup key from employee dict — matches what we built from the table."""
+            fn = str(emp.get("first_name") or "").strip().upper()
+            ln = str(emp.get("last_name") or "").strip().upper()
+            return f"{ln} {fn}" if fn and ln else ""
+
+        for emp in data.get("employees", []):
+            _k = _emi_key(emp)
+            _is_retro_emp = emp.get("adjustment_amount") and not emp.get("current_premium")
+
+            if _is_retro_emp:
+                # Retro row — enforce Medical into adjustment_amount only
+                if _k and _k in retro_lookup:
+                    _correct = retro_lookup[_k]
+                    _existing = str(emp.get("adjustment_amount") or "").strip()
+                    if _existing != _correct:
+                        print(f"[RPVE] EMI RETRO FIX [{emp.get('full_name')}]: adjustment_amount {_existing!r} -> {_correct!r}")
+                        emp["adjustment_amount"] = _correct
+                    emp["current_premium"] = None
+            else:
+                # Regular row — enforce Medical into current_premium, null adjustment
+                if _k and _k in medical_lookup:
+                    _correct = medical_lookup[_k]
+                    _existing = str(emp.get("current_premium") or "").strip()
+                    if _existing != _correct:
+                        print(f"[RPVE] EMI MEDICAL FIX [{emp.get('full_name')}]: current_premium {_existing!r} -> {_correct!r}")
+                        emp["current_premium"] = _correct
+                emp["adjustment_amount"] = None
+
+        print("[RPVE] Data Link EMI: Medical-column enforcement complete.")
 
     # Deduplicate after all other processing, before output generation
     data["employees"] = deduplicate_employees(data["employees"])
@@ -805,8 +1041,8 @@ async def extract(file: UploadFile = File(...)):
                 premium_val = round(float(re.sub(r'[^\d.-]', '', val_str)), 2)
             except:
                 premium_val = 0.0
-
-            if premium_val < 250 and not is_uhc and not is_excel:
+            is_datalink_emi = sub_type == "datalink_emi"   # only for this file type
+            if premium_val < 250 and not is_uhc and not is_excel and not is_datalink_emi:
                 analysis_data.append(emp)
             else:
                 final_employees.append(emp)
