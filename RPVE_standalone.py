@@ -20,7 +20,7 @@ GET  /health           Health check
 GET  /                 Serves RPVE_ui.html
 """
 
-import os, re, json, shutil
+import os, re, json, shutil, uuid, time
 import pdfplumber
 from pathlib import Path
 from datetime import datetime
@@ -93,9 +93,10 @@ HEADER_COLOURS = {
 # KEYWORD CLASSIFIER
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Simplified to only identify ADP ("engage") documents.
+# Simplified to identify ADP ("engage") and ACSA documents.
 KEYWORDS = {
-    "engage": ["TOTALSOURCE", "TOTALSOURCE BENEFITS INVOICE", "TOTALSOURCE® BENEFITS INVOICE", "NCT3-EPO", "ADP", "ADP, INC"],
+    "engage": ["TOTALSOURCE", "TOTALSOURCE BENEFITS INVOICE", "TOTALSOURCE® BENEFITS INVOICE", "NCT3-EPO", "ADP", "ADP, INC", 
+               "ASSOCIATION OF COMMUNITY SERVICE", "ACSA", "ACSA GROUP INSURANCE"],
     # Data Link EMI carrier
     "datalink_emi": ["DATA LINK EMI", "DATALINK EMI", "DATALINKEMI"],
 }
@@ -107,34 +108,43 @@ KEYWORDS = {
 PROMPTS = {
 
     "engage": """
-You are extracting data from an ADP TotalSource Benefits Invoice PDF.
+You are extracting data from a group health insurance invoice (ADP TotalSource, ACSA, or similar).
 
 Extract a SUMMARY and EMPLOYEES array.
 
-SUMMARY: company_name, invoice_number, billing_date, due_date, reference_number
+SUMMARY: company_name, invoice_number, billing_date, due_date, reference_number, total_amount_due
 
-EMP_LIST = [{"first_name":"","last_name":"","coverage":"","plan_name":"","coverage_option":"","current_premium":""}]
-  employees - one row per plan line per employee, PLUS a subtotal row for each employee:
-  first_name       : member first name
-  last_name        : member last name
-  coverage         : EXACT coverage tier/code (e.g. Employee, Family, EE+1, E, ES, ESC, EC, E1D, E2D, E3D, E4D, E5D, E6D, E7D, E8D, E9D, etc.)
-  plan_name        : insurance category/type (e.g. Medical, Dental, Vision)
-  coverage_option  : specific insurance product name (e.g. UnitedHealthcare Dental PPO 50, Choice Plus HDHP 1700)
-  current_premium  : dollar amount for that plan line
+FOR SUMMARY-ONLY INVOICES (like ACSA):
+If the invoice shows only summary financial data (no individual employee roster), create ONE consolidated record:
+  first_name: "SUMMARY"
+  last_name: "TOTAL" 
+  coverage: "EMPLOYER"
+  plan_name: "HEALTH PLAN"
+  coverage_option: billing period (e.g. "03/01/2026 through 03/31/2026")
+  current_premium: total amount due
 
-Rules: 
-1. INDIVIDUAL PLAN LINES: Extract every plan line for an employee with its individual cost.
-2. SUBTOTAL ROW: After all plan lines for an employee, add ONE subtotal row:
-   - coverage_option: (Set to exactly "TOTAL")
-   - current_premium: the sub-total amount for that specific employee.
-3. PAGE BREAK CONTINUATIONS (CRITICAL): Sometimes an employee's plan list spans across a page break. You will see their Name on page 1, followed by a page break and headers, and then their remaining plans on page 2 (often starting with "EE ID:xxx"). YOU MUST associate these orphaned plan lines on page 2 with the last named employee from the previous page. Do NOT create unnamed employee records.
-4. Each person must be represented by their individual plan rows, followed by their "TOTAL" subtotal row.
+FOR EMPLOYEE ROSTER INVOICES (like ADP):
+Create individual records for each employee plan line:
+  first_name: member first name
+  last_name: member last name  
+  coverage: EXACT coverage tier/code (e.g. Employee, Family, EE+1, E, ES, ESC, EC, E1D, etc.)
+  plan_name: insurance category/type (e.g. Medical, Dental, Vision)
+  coverage_option: specific insurance product name
+  current_premium: dollar amount for that plan line
+
+EXTRACTION RULES:
+1. DETECT FORMAT: Look for individual employee names vs summary-only financial data
+2. SUMMARY-ONLY: Extract employer name, billing period, and total financial summary
+3. ROSTER FORMAT: Extract each employee plan line with individual costs
+4. FINANCIAL DATA: Prior balance, adjustments, current cost, admin fees, total due
+5. DATES: Billing date, due date, billing period
+
 Use "" for missing values. Return ONLY valid JSON.
 
-{{
-  "summary": {{"company_name":"","invoice_number":"","billing_date":"","due_date":"","reference_number":""}},
-  "employees": [{{"first_name":"","last_name":"","coverage":"","plan_name":"","coverage_option":"","current_premium":""}}]
-}}
+{
+  "summary": {"company_name":"","invoice_number":"","billing_date":"","due_date":"","reference_number":"","total_amount_due":""},
+  "employees": [{"first_name":"","last_name":"","coverage":"","plan_name":"","coverage_option":"","current_premium":""}]
+}
 
 PDF TEXT: {text}
 """,
@@ -143,6 +153,120 @@ PDF TEXT: {text}
     # in the `extract_with_llm` function itself.
 
 }
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FALLBACK EXTRACTION FUNCTIONS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def extract_engage_fallback(text: str) -> dict:
+    """
+    Fallback regex-based extractor for engage subtype when LLM extraction fails.
+    Handles both ADP roster format and ACSA summary format.
+    """
+    import re
+    
+    # Initialize result structure
+    result = {
+        "summary": {
+            "company_name": "",
+            "invoice_number": "",
+            "billing_date": "",
+            "due_date": "",
+            "reference_number": "",
+            "total_amount_due": ""
+        },
+        "employees": []
+    }
+    
+    try:
+        text_upper = text.upper()
+        
+        # Check if this is ACSA format
+        if "ASSOCIATION OF COMMUNITY SERVICE" in text_upper or "ACSA" in text_upper:
+            return extract_acsa_summary_fallback(text)
+        
+        # For ADP/TotalSource format - extract basic summary info
+        # Extract company name (look for common patterns)
+        company_patterns = [
+            r'Company\s*:\s*(.+?)(?:\n|\r)',
+            r'Employer\s*Name\s*:\s*(.+?)(?:\n|\r)',
+            r'Client\s*:\s*(.+?)(?:\n|\r)'
+        ]
+        
+        for pattern in company_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                result["summary"]["company_name"] = match.group(1).strip()
+                break
+        
+        # Extract billing date
+        date_match = re.search(r'Billing\s*Date\s*:\s*(\d{2}/\d{2}/\d{4})', text, re.IGNORECASE)
+        if date_match:
+            result["summary"]["billing_date"] = date_match.group(1)
+        
+        # Extract total amount (look for final totals)
+        total_patterns = [
+            r'Total\s*Amount\s*Due\s*[:\s]*(\d{1,3}(?:,\d{3})*\.\d{2})',
+            r'Grand\s*Total\s*[:\s]*(\d{1,3}(?:,\d{3})*\.\d{2})',
+            r'Amount\s*Due\s*[:\s]*(\d{1,3}(?:,\d{3})*\.\d{2})'
+        ]
+        
+        for pattern in total_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                result["summary"]["total_amount_due"] = match.group(1)
+                break
+        
+        print(f"[RPVE] Engage fallback extraction: Found {len(result['employees'])} employee records")
+        return result
+        
+    except Exception as e:
+        print(f"[RPVE] Engage fallback extraction failed: {e}")
+        return {"summary": {}, "employees": []}
+
+
+def extract_acsa_summary_fallback(text: str) -> dict:
+    """
+    Fallback regex-based extractor for ACSA summary format when LLM extraction fails.
+    """
+    import re
+    
+    result = {
+        "summary": {
+            "company_name": "",
+            "invoice_number": "",
+            "billing_date": "",
+            "due_date": "",
+            "reference_number": "",
+            "total_amount_due": ""
+        },
+        "employees": []
+    }
+    
+    try:
+        # Extract company name for ACSA
+        company_match = re.search(r'Association\s+of\s+Community\s+Service\s+Agencies?[\s\-]*(.+?)(?:\n|\r)', text, re.IGNORECASE)
+        if company_match:
+            result["summary"]["company_name"] = company_match.group(1).strip()
+        
+        # Extract billing period
+        period_match = re.search(r'Billing\s+Period\s*[:\-\s]*(\d{2}/\d{2}/\d{4})[\s\-]*(\d{2}/\d{2}/\d{4})', text, re.IGNORECASE)
+        if period_match:
+            result["summary"]["billing_date"] = period_match.group(1)
+            result["summary"]["due_date"] = period_match.group(2)
+        
+        # Extract total amount
+        total_match = re.search(r'Total\s+Premium\s*[:\-\s]*\$(\d{1,3}(?:,\d{3})*\.\d{2})', text, re.IGNORECASE)
+        if total_match:
+            result["summary"]["total_amount_due"] = total_match.group(1)
+        
+        print(f"[RPVE] ACSA fallback extraction: Found {len(result['employees'])} employee records")
+        return result
+        
+    except Exception as e:
+        print(f"[RPVE] ACSA fallback extraction failed: {e}")
+        return {"summary": {}, "employees": []}
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CORE FUNCTIONS
@@ -244,23 +368,31 @@ def extract_text(pdf_path: Path, max_pages: int = 1000) -> str:
     extracted_upper = text.upper()
     text_quality_score = assess_text_quality(text)
     
-    # Trigger rostaing if:
-    # 1. Text is empty, OR
-    # 2. Keywords missing, OR
-    # 3. Text quality is too low (high corruption) - threshold 0.55
+    # ── CARRIER-SPECIFIC EXTRACTION UPGRADE ───────────────────────────
+    # If this is a wide-layout carrier like BlueCross or IBX, standard 
+    # vertical extraction often shreds rows. We force the high-accuracy 
+    # layout-preserving OCR fallback for these specifically.
+    WIDE_KEYWORDS = ["BLUE CROSS", "INDEPENDENCE", "BCBS", "CAPITAL BLUE", "IBX", "BLUE SHIELD"]
+    is_wide_carrier = any(kw in extracted_upper for kw in WIDE_KEYWORDS)
+
+    print(f"[RPVE] Extraction check: quality={text_quality_score:.2f}, is_wide={is_wide_carrier}")
+
     if (not text.strip() 
         or not any(kw in extracted_upper for kw in VALID_KEYWORDS)
-        or text_quality_score < 0.55):
+        or text_quality_score < 0.55
+        or is_wide_carrier):
         
         reason = ""
-        if not text.strip():
+        if is_wide_carrier:
+            reason = "wide carrier layout detected (forcing high-accuracy pass)"
+        elif not text.strip():
             reason = "text is empty"
         elif not any(kw in extracted_upper for kw in VALID_KEYWORDS):
             reason = f"keywords not found (quality: {text_quality_score:.2f})"
         else:
             reason = f"text quality too low ({text_quality_score:.2f} < 0.55 threshold)"
         
-        print(f"[RPVE] Triggering rostaing-ocr fallback: {reason}")
+        print(f"[RPVE] Triggering high-accuracy fallback: {reason}")
         rostaing_text = extract_text_with_rostaing(pdf_path)
         if rostaing_text and rostaing_text.strip():
             return rostaing_text
@@ -341,12 +473,96 @@ def extract_text_with_rostaing(pdf_path: Path) -> str:
     return ""
 
 
+def clean_invoice_text(text: str) -> str:
+    """
+    Remove common noise like page footers, headers, and copyright notices.
+    Also handles 'orphaned' Total rows that can confuse the LLM at page boundaries.
+    """
+    if not text: return ""
+    lines = text.split('\n')
+    cleaned_lines = []
+    
+    # Regex to detect page footers, headers, copyright notices, and orphaned Totals
+    # We remove "Total" rows that have NO provider/plan data if they appear near headers
+    header_footer_pattern = re.compile(r"""
+        ^\s*page\s+\d+\s+of\s+\d+\s*$|
+        copyright\s+©\s+.*adp,\s+inc|
+        ^\s*Name\s+Provider\s+Plan\s+Coverage\s+Type\s+Month\s+Cost\s*$|
+        ^\s*Total\s+\$[\d,]+\.\d{2}\s*$
+    """, re.IGNORECASE | re.VERBOSE)
+
+    for line in lines:
+        # If the line doesn't match the noise pattern, keep it
+        if not header_footer_pattern.search(line):
+            cleaned_lines.append(line)
+            
+    return '\n'.join(cleaned_lines)
+
+def group_indented_lines(text: str) -> str:
+    """
+    DYNAMICAL SOLUTION: 
+    Detects lines starting with significant whitespace OR 'EE ID:' and 
+    stitches them to the preceding 'Name' row. 
+    """
+    if not text: return ""
+    lines = text.split('\n')
+    output = []
+    current_block = ""
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+            
+        # DYNAMICAL RULES:
+        # 1. Any line starting with "EE ID:" belongs to the employee above.
+        # 2. Any line starting with 10+ spaces (indentation > name) belongs to employee above.
+        # 3. Any line starting with "Total" (at sub-indentation) belongs to employee above.
+        
+        is_sub_row = (
+            stripped.startswith("EE ID:") or 
+            line.startswith("          ") or 
+            (line.startswith("     ") and stripped.startswith("Total"))
+        )
+        
+        if is_sub_row and current_block:
+            current_block += " [SUB-ROW] " + stripped
+        else:
+            if current_block:
+                output.append(current_block)
+            current_block = line
+            
+    if current_block:
+        output.append(current_block)
+        
+    return '\n'.join(output)
+
+
 def classify(text: str) -> str:
-    """Classifies the document as 'engage' (ADP) or 'generic'."""
+    """Classifies the document for extraction type."""
     t = text.upper()
+    
+    # Priority 1: Check for ADP/TotalSource (original engage)
+    if "TOTALSOURCE" in t or "ADP" in t:
+        print("[RPVE] Detected ADP TotalSource format.")
+        return "engage"
+    
+    # Priority 2: Check for ACSA/Community Service Agencies (treat as engage)
+    if "ASSOCIATION OF COMMUNITY SERVICE" in t or "ACSA" in t:
+        print("[RPVE] Detected ACSA Health Plan format, treating as engage type.")
+        return "engage"
+    
+    # Priority 3: Check for other specific formats
     for sub_type, kwlist in KEYWORDS.items():
         if any(kw in t for kw in kwlist):
+            print(f"[RPVE] Classified as {sub_type.upper()} format.")
             return sub_type
+    
+    # Check for summary-only invoice characteristics (treat as engage)
+    if "EMPLOYER NAME" in t and "BILLING DATE" in t and "TOTAL AMOUNT" in t:
+        print("[RPVE] Detected summary-only invoice format, treating as engage type.")
+        return "engage"
+    
     print("[RPVE] No specific keywords matched. Using GENERIC extractor.")
     return "generic"
 
@@ -384,6 +600,10 @@ def extract_with_llm(sub_type: str, text: str, ev_mode: bool = False) -> dict:
     """
     # Clean the text to handle multi-page table fragmentation
     text = clean_invoice_text(text)
+    
+    # DYNAMICAL STITCHING: Group indented rows before sending to LLM
+    if sub_type in ["engage", "prestige", "velocity"]:
+        text = group_indented_lines(text)
 
     # 1. Determine which prompt to use
     prompt_template = PROMPTS.get(sub_type)
@@ -415,8 +635,13 @@ Do NOT extract random text near plan sections, headers, footers, or unrelated la
 🔹 DO NOT ABBREVIATE OR TRUNCATE PLAN NAMES (CRITICAL):
 The plan name MUST match the FULL string found in the "Plan" column of the PDF.
 
+🔹 ADP LAYOUT STRUCTURE:
+Data is typically organized as a Header Row (Name + First Plan) followed by Indented Rows (Additional Plans). 
+The pre-processor has marked these as '[SUB-ROW]'. You MUST split these [SUB-ROW] markers into separate individual plan records for the same employee.
+
 🔹 PAGE BREAK CONTINUATIONS (CRITICAL):
-Sometimes an employee's plan list spans across a page break. You will see their Name on page 1, followed by a page break and headers, and then their remaining plans on page 2 (often starting with "EE ID:xxx"). YOU MUST associate these orphaned plan lines on page 2 with the last named employee from the previous page. Do NOT create unnamed employee records.
+If you see an employee's data interrupted or continued, associate all subsequent plan lines with that specific employee until a new Name is encountered. 
+Do NOT create unnamed records for orphaned plan lines.
 
 🔹 NAME FORMATTING (CRITICAL):
 Names are often printed as "LastName, FirstName" or "LastName, FirstName Middle" (e.g. "Smith, John Adam"). Properly identify and split the `last_name` and `first_name` without inverting them.
@@ -436,10 +661,15 @@ Names are often printed as "LastName, FirstName" or "LastName, FirstName Middle"
 - home_zip_code
 - billing_period: The start and end date of the billing cycle for the line item (e.g., "01/01/2024 - 01/31/2024").
 
-🔹 KEY RULES
-- One row per individual member (unless it is an ADP/Insperity invoice, in which case extract EVERY plan row so we can collapse them later).
-- Accuracy > Completeness. Return valid JSON only.
-- Do not hallucinate plan names.
+🔹 MAXIMUM RECALL (CRITICAL):
+- **Completeness is the HIGHEST priority.** You MUST extract EVERY individual enrollment row found in the document.
+- Do NOT skip any rows. Even if a row has partial data, extract what is available.
+- If the document contains a roster (like IBX or BCBS), expect dozens of members. You must continue until the very end of the list.
+
+🔹 KEY RULES:
+- One row per individual member.
+- Strictly adhere to JSON format.
+- Do not hallucinate, but do not omit valid rows.
 
 🔹 INSPERITY / MANIFEST MEDEX:
 - If column headers include "Coverage Type" and "Coverage Option", map "Coverage Type" -> `plan_type` and "Coverage Option" -> `plan_name`. Do not mix them up.
@@ -463,6 +693,11 @@ Names are often printed as "LastName, FirstName" or "LastName, FirstName Middle"
 - Example: Medical=$0.00, Dental=$58.10, Vision=$0.00, Total Due=$58.10 → current_premium="$0.00" ✅ NOT "$58.10" ❌
 - Example: Medical=$334.78, Dental=$27.90, Vision=$7.70, Total Due=$412.38 → current_premium="$334.78" ✅ NOT "$412.38" ❌
 - **If you return Total Due, Dental, Vision, or Garner HRA in any field, you have failed the task.**
+
+🔹 BLUECROSS BLUE SHIELD (BCBS) SPECIAL RULE (CRITICAL):
+- **ALWAYS extract the value from the "Total Premium" column as the `current_premium`.**
+- **STRICTLY FORBIDDEN:** Do NOT use the "Employee Medical", "Dependent(s) Medical", or "Total Medical" columns for the premium value on these forms. 
+- You MUST ignore the internal sub-columns and jump to the far-right "Total Premium" column for every member.
 
 🔹 COVERAGE FALLBACK (e.g. BLUECROSS):
 - If the document lacks an explicit 'Coverage' column or it is blank, YOU MUST INFER the coverage tier from the relationship or enrollee type (e.g. 'EE', 'Subscriber' -> EE, 'SP', 'Spouse' -> ES).
@@ -535,24 +770,85 @@ PDF TEXT: {{text}}
             )
             raw = response.choices[0].message.content
             try:
-                data = json.loads(raw)
-            except json.JSONDecodeError:
-                data = json.loads(re.sub(r"```json|```", "", raw).strip())
+                # Try multiple JSON parsing strategies
+                data = None
                 
-            if not final_summary and data.get("summary"):
-                # Always grab summary from the first successful chunk
-                final_summary = data.get("summary")
+                # Strategy 1: Direct parsing
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError:
+                    pass
                 
-            emps = data.get("employees", [])
-            all_employees.extend(emps)
-            print(f"  [RPVE] Chunk {i+1}/{len(chunks)} processed -> found {len(emps)} records")
+                # Strategy 2: Remove markdown code blocks
+                if not data:
+                    try:
+                        cleaned = re.sub(r"```json|```", "", raw).strip()
+                        data = json.loads(cleaned)
+                    except json.JSONDecodeError:
+                        pass
+                
+                # Strategy 3: Extract JSON from text
+                if not data:
+                    try:
+                        # Look for JSON object pattern
+                        json_match = re.search(r'\{[\s\S]*\}', raw)
+                        if json_match:
+                            data = json.loads(json_match.group())
+                    except json.JSONDecodeError:
+                        pass
+                
+                # Strategy 4: Try to fix common JSON issues
+                if not data:
+                    try:
+                        # Fix unterminated strings and missing quotes
+                        fixed = re.sub(r'(?<!\\)"(?!\\)', '"', raw)  # Fix quote escaping
+                        fixed = re.sub(r'\n\s*"', '"', fixed)     # Remove newlines before quotes
+                        fixed = re.sub(r'"\s*\n', '"', fixed)     # Remove newlines after quotes
+                        data = json.loads(fixed)
+                    except json.JSONDecodeError:
+                        pass
+                
+                if data:
+                    if not final_summary and data.get("summary"):
+                        # Always grab summary from the first successful chunk
+                        final_summary = data.get("summary")
+                        
+                    emps = data.get("employees", [])
+                    all_employees.extend(emps)
+                    print(f"  [RPVE] Chunk {i+1}/{len(chunks)} processed -> found {len(emps)} records")
+                else:
+                    print(f"  [RPVE] Chunk {i+1}/{len(chunks)} failed: Could not parse JSON from response")
+                    
+            except Exception as parse_error:
+                print(f"  [RPVE] Chunk {i+1}/{len(chunks)} failed: {parse_error}")
         except Exception as e:
             print(f"  [RPVE] Chunk {i+1}/{len(chunks)} failed: {e}")
 
-    return {
+    result = {
         "summary": final_summary,
         "employees": all_employees
     }
+    
+    # Special fallback for engage type when LLM extraction fails or returns empty
+    if sub_type == "engage" and (not all_employees or len(all_employees) == 0):
+        print(f"[RPVE] LLM extraction returned empty for engage, trying fallback extractors...")
+        
+        # Check if this is an ACSA-style summary invoice
+        if "ASSOCIATION OF COMMUNITY SERVICE" in text.upper() or "ACSA" in text.upper():
+            print(f"[RPVE] Detected ACSA format, using summary fallback...")
+            fallback_result = extract_acsa_summary_fallback(text)
+            if fallback_result and fallback_result.get("employees"):
+                print(f"[RPVE] ACSA fallback successful, returning {len(fallback_result['employees'])} records")
+                return fallback_result
+        
+        # Try generic regex extraction for other engage formats
+        print(f"[RPVE] Trying generic engage fallback...")
+        generic_fallback = extract_engage_fallback(text)
+        if generic_fallback and generic_fallback.get("employees"):
+            print(f"[RPVE] Generic engage fallback successful, returning {len(generic_fallback['employees'])} records")
+            return generic_fallback
+    
+    return result
 
 
 def deduplicate_employees(employees: list[dict]) -> list[dict]:
@@ -764,14 +1060,19 @@ async def extract(file: UploadFile = File(...)):
     if ext not in [".pdf", ".csv", ".xlsx", ".xls"]:
         raise HTTPException(400, f"Supported formats: PDF, CSV, XLSX, XLS. Got: {ext}")
 
+    # ── UNIQUE UPLOAD PATH ────────────────────────────────────────────
+    # Add UUID + Timestamp to filename to avoid PermissionErrors if file is open locally
+    unique_id = uuid.uuid4().hex[:8]
+    timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
     safe = re.sub(r'[\\/:*?"<>|]', "_", file.filename)
-    file_path = UPLOAD_DIR / safe
-    # Clean and truncate stem to avoid OS path length and character issues
+    filename_unique = f"{unique_id}_{timestamp_str}_{safe}"
+    file_path = UPLOAD_DIR / filename_unique
+    
+    # Clean and truncate stem for the output folder (cosmetic naming)
     stem = Path(safe).stem.replace(" ", "_").strip()[:50]
     
     # Create specific output directory
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    run_out_dir = OUTPUT_DIR / f"{stem}_{timestamp}"
+    run_out_dir = OUTPUT_DIR / f"{stem}_{timestamp_str}"
     run_out_dir.mkdir(parents=True, exist_ok=True)
     
     with open(file_path, "wb") as f:
