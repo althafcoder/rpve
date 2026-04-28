@@ -23,7 +23,7 @@ function randomBetween(min: number, max: number) {
 export function useDocumentProcessor() {
     const [documents, setDocuments] = useState<DocumentFile[]>([]);
     const [activeDocId, setActiveDocId] = useState<string | null>(null);
-    const processingQueue = useRef<{ id: string; file: File }[]>([]);
+    const processingQueue = useRef<{ id: string; file: File | File[] }[]>([]);
     const isProcessing = useRef(false);
 
     const updateDoc = useCallback((id: string, updates: Partial<DocumentFile>) => {
@@ -33,7 +33,7 @@ export function useDocumentProcessor() {
     }, []);
 
     const processDocument = useCallback(
-        async (id: string, file: File, evMode: boolean = false) => {
+        async (id: string, files: File | File[], evMode: boolean = false) => {
             updateDoc(id, { stage: "classification", stageMessage: "Starting processing...", startedAt: Date.now() });
 
             let isSimulationRunning = true;
@@ -57,13 +57,25 @@ export function useDocumentProcessor() {
 
             try {
                 const formData = new FormData();
-                formData.append("file", file);
+                const fileArray = Array.isArray(files) ? files : [files];
+                
+                fileArray.forEach(file => {
+                    formData.append("files", file);
+                });
                 formData.append("ev_mode", String(evMode));
 
-                const response = await fetch("/api/extract", {
+                const endpoint = fileArray.length > 1 ? "/api/process-flow" : "/api/extract";
+                // For a single file we map "files" back to "file" since /api/extract expects "file"
+                if (fileArray.length === 1) {
+                    formData.delete("files");
+                    formData.append("file", fileArray[0]);
+                }
+
+                const response = await fetch(endpoint, {
                     method: "POST",
                     body: formData,
                 });
+
 
                 // Stop simulation regardless of success/fail
                 isSimulationRunning = false;
@@ -216,19 +228,42 @@ export function useDocumentProcessor() {
 
     const addFiles = useCallback(
         (files: File[], evMode: boolean = false) => {
-            const newDocs: DocumentFile[] = files.map((file) => ({
-                id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-                file,
-                name: file.name,
-                size: file.size,
-                stage: "queued" as ProcessingStage,
-                stageMessage: "Waiting in queue...",
-                progress: 0,
-                result: null,
-                error: null,
-                startedAt: null,
-                completedAt: null,
-            }));
+            let newDocs: DocumentFile[] = [];
+
+            if (files.length > 1) {
+                // Group multiple files into a single task
+                const pdfFile = files.find(f => f.name.toLowerCase().endsWith('.pdf'));
+                const mainName = pdfFile ? pdfFile.name : `Batch of ${files.length} files`;
+                const totalSize = files.reduce((acc, f) => acc + f.size, 0);
+
+                newDocs = [{
+                    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                    file: files,
+                    name: `Flow: ${mainName}`,
+                    size: totalSize,
+                    stage: "queued" as ProcessingStage,
+                    stageMessage: "Waiting in queue...",
+                    progress: 0,
+                    result: null,
+                    error: null,
+                    startedAt: null,
+                    completedAt: null,
+                }];
+            } else {
+                newDocs = files.map((file) => ({
+                    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                    file,
+                    name: file.name,
+                    size: file.size,
+                    stage: "queued" as ProcessingStage,
+                    stageMessage: "Waiting in queue...",
+                    progress: 0,
+                    result: null,
+                    error: null,
+                    startedAt: null,
+                    completedAt: null,
+                }));
+            }
 
             setDocuments((prev) => [...prev, ...newDocs]);
 

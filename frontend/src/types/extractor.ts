@@ -64,7 +64,7 @@ export interface DocumentMetadata {
 
 export interface DocumentFile {
   id: string;
-  file: File;
+  file: File | File[];
   name: string;
   size: number;
   stage: ProcessingStage;

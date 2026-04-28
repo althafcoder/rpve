@@ -3,3 +3,17 @@ rpve_outputs/
 rpve_uploads/
 __pycache__/
 new poc/
+phase_2/template_fill/type1/census/
+phase_2/template_fill/type1/output/
+phase_2/template_fill/type1/reference/
+phase_2/template_fill/type1/__pycache__/
+phase_2/template_fill/type2/census/
+phase_2/template_fill/type2/output/
+phase_2/template_fill/type2 /reference/
+phase_2/template_fill/type2/__pycache__/
+phase_2/template_fill/type3/census/
+phase_2/template_fill/type3/output/
+phase_2/template_fill/type3/reference/
+phase_2/template_fill/type3/__pycache__/
+phase_2/template_fill/__pycache__/
+phase_2/template_fill/venv/

@@ -652,10 +652,10 @@ Names are often printed as "LastName, FirstName" or "LastName, FirstName Middle"
 - middal_name (Middle Name)
 - last_name
 - coverage (e.g. ES / EC / FAM / EE / SP / CH)
-- plan_name (FULL plan/product description — do NOT truncate)
+- plan_name (FULL plan/product description — do NOT truncate) eg : "coverage_option"- ConnectiCare Medical FlexPOS 5000
 - plan_type (insurance category: Medical, Dental, Vision, etc.)
-- current_premium: The individual plan line cost for that specific plan row.
-- adjustment_amount: Any adjustment amount listed.(CRITICAL for UHC: If this is a UnitedHealthcare document and the "Adjustment Detail -> Amount" is empty or missing, you MUST map the value from the "Totals -> Total" column to this field).
+- current_premium: The individual plan line cost for that specific plan row. (**CRITICAL FOR UHC/UHC NA**: ALWAYS use the "Totals -> Total" column value from the far-right. DO NOT use "Charge Amount".)
+- adjustment_amount: Any adjustment amount listed.
 - birth_date
 - gender (M / F — infer if not present)
 - home_zip_code
@@ -701,6 +701,13 @@ Names are often printed as "LastName, FirstName" or "LastName, FirstName Middle"
 
 🔹 COVERAGE FALLBACK (e.g. BLUECROSS):
 - If the document lacks an explicit 'Coverage' column or it is blank, YOU MUST INFER the coverage tier from the relationship or enrollee type (e.g. 'EE', 'Subscriber' -> EE, 'SP', 'Spouse' -> ES).
+
+🔹 UNITEDHEALTHCARE (UHC / UHC NA) SPECIAL RULE (CRITICAL):
+- **ALWAYS extract the value from the far-right "Totals -> Total" column as the `current_premium`.**
+- **STRICTLY FORBIDDEN:** Do NOT use the "Charge Amount" column under "Current Detail" for the premium value on these forms. 
+- **MANDATORY:** You MUST ignore the "Charge Amount" column and use the far-right "Totals -> Total" column for every member.
+- **EXAMPLE:** For a row containing "$1,718.41 [other values] $1,718.41 $3,436.82", the `current_premium` MUST BE "$3,436.82". 
+- **ADJUSTMENT HANDLING:** Set `adjustment_amount` to NULL/Empty for these rows if the adjustment is already included in the "Total" value you mapped to `current_premium`.
 
 🔹 Coverage Recovery  : Map coverage type codes using the following legend for ALL UHC documents:
     - `E` or "Employee Only" → **EE**
@@ -1051,37 +1058,23 @@ async def health():
     return {"status": "ok", "service": "RPVE", "sub_types": list(KEYWORDS.keys())}
 
 
-@app.post("/api/extract")
-async def extract(file: UploadFile = File(...)):
-    print(f"\n[RPVE] Extraction Mode -> Standard")
-    if not file.filename:
-        raise HTTPException(400, "No filename provided")
-    ext = Path(file.filename).suffix.lower()
-    if ext not in [".pdf", ".csv", ".xlsx", ".xls"]:
-        raise HTTPException(400, f"Supported formats: PDF, CSV, XLSX, XLS. Got: {ext}")
-
-    # ── UNIQUE UPLOAD PATH ────────────────────────────────────────────
-    # Add UUID + Timestamp to filename to avoid PermissionErrors if file is open locally
-    unique_id = uuid.uuid4().hex[:8]
-    timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
-    safe = re.sub(r'[\\/:*?"<>|]', "_", file.filename)
-    filename_unique = f"{unique_id}_{timestamp_str}_{safe}"
-    file_path = UPLOAD_DIR / filename_unique
+async def process_invoice_data(file_path: Path, original_filename: str):
+    print(f"\n[RPVE] Processing -> {original_filename}")
+    ext = Path(original_filename).suffix.lower()
     
+    # ── UNIQUE OUTPUT PATH ────────────────────────────────────────────
+    timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
     # Clean and truncate stem for the output folder (cosmetic naming)
+    safe = re.sub(r'[\\/:*?"<>|]', "_", original_filename)
     stem = Path(safe).stem.replace(" ", "_").strip()[:50]
     
     # Create specific output directory
     run_out_dir = OUTPUT_DIR / f"{stem}_{timestamp_str}"
     run_out_dir.mkdir(parents=True, exist_ok=True)
-    
-    with open(file_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
-    print(f"\n[RPVE] Received -> {safe}")
 
     try:
-        from identification import universal_extract_text
-        text = universal_extract_text(file_path)
+        # Using local extract_text function instead of missing identification module
+        text = extract_text(file_path)
         
         # Consistent Text Output: Save the extracted text for ALL file types
         txt_path = run_out_dir / f"{stem}.txt"
@@ -1091,10 +1084,10 @@ async def extract(file: UploadFile = File(...)):
         
     except Exception as read_err:
         print(f"[RPVE] Read error: {read_err}")
-        raise HTTPException(422, f"Failed to extract text from {ext} file: {read_err}")
+        raise Exception(f"Failed to extract text from {ext} file: {read_err}")
 
     if not text.strip():
-        raise HTTPException(422, "No text extracted. File may be empty or an unreadable image.")
+        raise Exception("No text extracted. File may be empty or an unreadable image.")
 
     # ---- Filename-based fallback for Data Link EMI ----
     # Normalise filename: replace underscores/hyphens with spaces so that
@@ -1111,7 +1104,7 @@ async def extract(file: UploadFile = File(...)):
     try:
         data = extract_with_llm(sub_type, text)
     except Exception as e:
-        raise HTTPException(500, f"LLM extraction failed: {str(e)}")
+        raise Exception(f"LLM extraction failed: {str(e)}")
 
     # Clean up results: Remove rows without names (Center for Human Development fix)
     all_emps = data.get("employees", [])
@@ -1145,13 +1138,9 @@ async def extract(file: UploadFile = File(...)):
             emp["plan_name"] = emp.get("plan_type")
 
     # ── Post-LLM clean-up for Data Link EMI ─────────────────────────────────
-    # CRITICAL ENFORCEMENT: Even if the LLM ignored the prompt rule and returned
-    # Total Due / Dental / Vision instead of Medical, we catch and fix it here
-    # by re-parsing the PDF table with pdfplumber directly.
     if sub_type == "datalink_emi":
-        # Build a lookup: last_name -> medical value, directly from the PDF table
-        medical_lookup: dict[str, str] = {}          # key = LASTNAME_FIRSTNAME upper
-        retro_lookup:   dict[str, str] = {}          # key = LASTNAME_FIRSTNAME upper
+        medical_lookup: dict[str, str] = {}
+        retro_lookup:   dict[str, str] = {}
         try:
             import pdfplumber
             with pdfplumber.open(str(file_path)) as _pdf:
@@ -1159,42 +1148,26 @@ async def extract(file: UploadFile = File(...)):
                     _tables = _page.extract_tables()
                     for _tbl in _tables:
                         for _row in _tbl:
-                            if not _row or len(_row) < 5:
-                                continue
-                            # EMI table layout: ID | Name | Status | Medical | Garner HRA | Dental | Vision | Total Due
-                            # OR retro:         ID | Name | Coverage Dates | Status | Medical | Garner HRA | Dental | Vision | Total Due
+                            if not _row or len(_row) < 5: continue
                             _name_cell = str(_row[1] or "").strip()
-                            if not _name_cell or _name_cell.lower() in ("name", ""):
-                                continue
-
-                            # Detect retro rows (have coverage dates col)
+                            if not _name_cell or _name_cell.lower() in ("name", ""): continue
                             _is_retro = False
-                            _medical_idx = 3   # default: col 3 = Medical
+                            _medical_idx = 3
                             if len(_row) >= 9:
-                                # retro layout has one extra column (Coverage Dates)
                                 _date_cell = str(_row[2] or "")
                                 if "/" in _date_cell or "-" in _date_cell:
                                     _is_retro = True
                                     _medical_idx = 4
-
                             _medical_val = str(_row[_medical_idx] or "").strip()
-                            # Validate: should look like a dollar amount
-                            if not re.match(r'^\$?-?[\d,]+\.\d{2}$', _medical_val.replace("(", "").replace(")", "")):
-                                continue
-
-                            # Normalise name to key
+                            if not re.match(r'^\$?-?[\d,]+\.\d{2}$', _medical_val.replace("(", "").replace(")", "")): continue
                             _key = re.sub(r'\s+', ' ', _name_cell.upper().replace(",", "")).strip()
-                            if _is_retro:
-                                retro_lookup[_key] = _medical_val
-                            else:
-                                medical_lookup[_key] = _medical_val
-
-            print(f"[RPVE] Data Link EMI: built medical_lookup with {len(medical_lookup)} rows, retro_lookup with {len(retro_lookup)} rows.")
+                            if _is_retro: retro_lookup[_key] = _medical_val
+                            else: medical_lookup[_key] = _medical_val
+            print(f"[RPVE] Data Link EMI: built lookup tables.")
         except Exception as _lookup_err:
-            print(f"[RPVE] Data Link EMI: pdfplumber lookup failed ({_lookup_err}), skipping enforcement.")
+            print(f"[RPVE] Data Link EMI: pdfplumber lookup failed ({_lookup_err})")
 
         def _emi_key(emp: dict) -> str:
-            """Build lookup key from employee dict — matches what we built from the table."""
             fn = str(emp.get("first_name") or "").strip().upper()
             ln = str(emp.get("last_name") or "").strip().upper()
             return f"{ln} {fn}" if fn and ln else ""
@@ -1202,217 +1175,185 @@ async def extract(file: UploadFile = File(...)):
         for emp in data.get("employees", []):
             _k = _emi_key(emp)
             _is_retro_emp = emp.get("adjustment_amount") and not emp.get("current_premium")
-
             if _is_retro_emp:
-                # Retro row — enforce Medical into adjustment_amount only
-                if _k and _k in retro_lookup:
-                    _correct = retro_lookup[_k]
-                    _existing = str(emp.get("adjustment_amount") or "").strip()
-                    if _existing != _correct:
-                        print(f"[RPVE] EMI RETRO FIX [{emp.get('full_name')}]: adjustment_amount {_existing!r} -> {_correct!r}")
-                        emp["adjustment_amount"] = _correct
-                    emp["current_premium"] = None
+                if _k and _k in retro_lookup: emp["adjustment_amount"] = retro_lookup[_k]
+                emp["current_premium"] = None
             else:
-                # Regular row — enforce Medical into current_premium, null adjustment
-                if _k and _k in medical_lookup:
-                    _correct = medical_lookup[_k]
-                    _existing = str(emp.get("current_premium") or "").strip()
-                    if _existing != _correct:
-                        print(f"[RPVE] EMI MEDICAL FIX [{emp.get('full_name')}]: current_premium {_existing!r} -> {_correct!r}")
-                        emp["current_premium"] = _correct
+                if _k and _k in medical_lookup: emp["current_premium"] = medical_lookup[_k]
                 emp["adjustment_amount"] = None
 
-        print("[RPVE] Data Link EMI: Medical-column enforcement complete.")
-
-    # Deduplicate after all other processing, before output generation
     data["employees"] = deduplicate_employees(data["employees"])
-
-    # billing_period is now a unified field and will be preserved for deduplication and output
-
-    # stem + run_out_dir already set above, do not reassign
-    analysis_file_name = None  # initialised here so it's always in scope
+    analysis_file_name = None
 
     try:
-        # Determine the actual fields used for this extraction strictly by mode
         active_fields = EMPLOYEE_FIELDS.get(sub_type, UNIFIED_FIELDS)
-
-        # ── ADP Post-Processing ───────────────────────────────────────
-        # If the extracted text looks like an ADP invoice, collapse individual
-        # plan rows per employee into one row (total premium + primary plan name)
-        # and filter out any employee whose total is <= $0.
         extracted_text_upper = text.upper()
-        # "Manifest Medex" is an Insperity form, so include INSPERITY. 
-        # But ADP forms strictly apply the $250 filter.
-        is_strict_adp = (
-            "TOTALSOURCE" in extracted_text_upper
-            or "ADP" in extracted_text_upper
-            or "NCT3-EPO" in extracted_text_upper
-        )
+        is_strict_adp = ("TOTALSOURCE" in extracted_text_upper or "ADP" in extracted_text_upper or "NCT3-EPO" in extracted_text_upper)
         is_peo = is_strict_adp or "INSPERITY" in extracted_text_upper
         
         analysis_data = []
-
         if is_peo:
             from collections import defaultdict
             grouped2: dict = defaultdict(list)
             for emp in data.get("employees", []):
-                # Initial skip based on names
                 pname = str(emp.get("plan_name") or "").strip().upper()
                 ptype = str(emp.get("plan_type") or "").strip().upper()
                 copt  = str(emp.get("coverage_option") or "").strip().upper()
-                if any(x in pname or x in ptype or x in copt for x in ("TOTAL", "SUBTOTAL", "GRAND TOTAL")):
-                    continue
-
-                key = (
-                    str(emp.get("first_name", "")).strip().upper(),
-                    str(emp.get("last_name", "")).strip().upper()
-                )
+                if any(x in pname or x in ptype or x in copt for x in ("TOTAL", "SUBTOTAL", "GRAND TOTAL")): continue
+                key = (str(emp.get("first_name", "")).strip().upper(), str(emp.get("last_name", "")).strip().upper())
                 grouped2[key].append(emp)
 
             collapsed = []
             for (fname, lname), rows in grouped2.items():
                 if not rows: continue
-                
-                # ── Parse all premiums FIRST then decide ─────────────────
                 parsed_rows = []
                 for r in rows:
                     val_str = str(r.get("current_premium") or "").replace("$", "").replace(",", "")
-                    try:
-                        v = round(float(re.sub(r'[^\d.-]', '', val_str)), 2)
-                    except:
-                        v = 0.0
+                    try: v = round(float(re.sub(r'[^\d.-]', '', val_str)), 2)
+                    except: v = 0.0
                     parsed_rows.append((v, r))
-
-                # ── AFTER collecting all rows: detect and strip TOTAL row ─
                 parsed_rows.sort(key=lambda x: x[0], reverse=True)
-
                 valid_benefit_rows = []
                 if len(parsed_rows) > 1:
                     top_val, top_row = parsed_rows[0]
                     remaining_sum = sum(v for v, _ in parsed_rows[1:])
-                    if abs(top_val - remaining_sum) < 0.1:
-                        print(f"[RPVE] Detected and removed TOTAL row for {fname} {lname}: {top_val}")
-                        valid_benefit_rows = parsed_rows[1:]
-                    else:
-                        valid_benefit_rows = parsed_rows
-                else:
-                    valid_benefit_rows = parsed_rows
-
-                # ── Pick the single best (highest premium) row ────────────
+                    if abs(top_val - remaining_sum) < 0.1: valid_benefit_rows = parsed_rows[1:]
+                    else: valid_benefit_rows = parsed_rows
+                else: valid_benefit_rows = parsed_rows
                 if valid_benefit_rows:
                     valid_benefit_rows.sort(key=lambda x: x[0], reverse=True)
                     best_val, best_row = valid_benefit_rows[0]
-
                     pname = str(best_row.get("plan_name") or "").strip().upper()
-                    if pname in ("TOTAL", "SUBTOTAL"):
-                        continue
-
-                    # ── FIX 1: PLAN_NAME — use coverage_option (full product
-                    #    name) as plan_name, and demote plan_name → plan_type
+                    if pname in ("TOTAL", "SUBTOTAL"): continue
                     cov_opt = str(best_row.get("coverage_option") or "").strip()
                     cat_name = str(best_row.get("plan_name") or "").strip()
                     if cov_opt and cov_opt.upper() not in ("TOTAL", "NONE", ""):
-                        best_row = dict(best_row)          # don't mutate original
-                        best_row["plan_name"] = cov_opt    # full product name
-                        if not best_row.get("plan_type"):
-                            best_row["plan_type"] = cat_name  # category → plan_type
-
-                    # ── FIX 2: FULL_NAME — build from parts if missing ────
+                        best_row = dict(best_row)
+                        best_row["plan_name"] = cov_opt
+                        if not best_row.get("plan_type"): best_row["plan_type"] = cat_name
                     if not str(best_row.get("full_name") or "").strip():
                         best_row = dict(best_row)
-                        parts = [
-                            str(best_row.get("first_name") or "").strip(),
-                            str(best_row.get("middal_name") or "").strip(),
-                            str(best_row.get("last_name") or "").strip(),
-                        ]
+                        parts = [str(best_row.get("first_name") or "").strip(), str(best_row.get("middal_name") or "").strip(), str(best_row.get("last_name") or "").strip()]
                         best_row["full_name"] = " ".join(p for p in parts if p)
-
                     collapsed.append(best_row)
-
             data["employees"] = collapsed
-            print(f"[RPVE] PEO Post-Processing: {len(collapsed)} employees after collapsing")
 
-        # ── Global < $250 Filter (Applies to all files EXCEPT UHC & Excel input) ───
-        is_uhc = "UNITEDHEALTHCARE" in extracted_text_upper or "UNITED HEALTHCARE" in extracted_text_upper
+        is_uhc = any(x in extracted_text_upper for x in ["UNITEDHEALTHCARE", "UNITED HEALTHCARE", "UHC"])
         is_excel = ext in [".xlsx", ".xls"]
         final_employees = []
         for emp in data.get("employees", []):
             val_str = str(emp.get("current_premium") or "").replace("$", "").replace(",", "")
-            try:
-                premium_val = round(float(re.sub(r'[^\d.-]', '', val_str)), 2)
-            except:
-                premium_val = 0.0
-            is_datalink_emi = sub_type == "datalink_emi"   # only for this file type
-            if premium_val < 250 and not is_uhc and not is_excel and not is_datalink_emi:
-                analysis_data.append(emp)
-            else:
-                final_employees.append(emp)
-                
+            try: premium_val = round(float(re.sub(r'[^\d.-]', '', val_str)), 2)
+            except: premium_val = 0.0
+            is_datalink_emi = sub_type == "datalink_emi"
+            if premium_val < 250 and not is_uhc and not is_excel and not is_datalink_emi: analysis_data.append(emp)
+            else: final_employees.append(emp)
         data["employees"] = final_employees
-        print(f"[RPVE] Global Filter: {len(final_employees)} kept, {len(analysis_data)} moved to analysis (UHC/Excel Exempt: {is_uhc or is_excel}).")
 
-
-        # Build regular outputs (saved into the per-file subfolder)
         xlsx_path = build_excel(data, sub_type, stem, active_employee_fields=active_fields, out_dir=run_out_dir)
         json_path = build_json_file(data, sub_type, stem, active_employee_fields=active_fields, out_dir=run_out_dir)
-        print(f"[RPVE] Output folder -> {run_out_dir}")
-
-        # Build analysis file if there's any ADP < $250 data
         if analysis_data:
             analysis_path = run_out_dir / f"{stem}_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
             with open(str(analysis_path), "w", encoding="utf-8") as af:
                 json.dump(analysis_data, af, indent=2, ensure_ascii=False)
             analysis_file_name = analysis_path.name
             _cache[analysis_file_name] = str(analysis_path)
-            print(f"[RPVE] Saved {len(analysis_data)} below-threshold ADP rows to {analysis_file_name}")
 
     except Exception as build_err:
         import traceback
         print(f"[RPVE] Output building error:\n{traceback.format_exc()}")
-        raise HTTPException(500, f"Failed to generate output files: {str(build_err)}")
+        raise Exception(f"Failed to generate output files: {str(build_err)}")
 
     _cache[xlsx_path.name] = str(xlsx_path)
     _cache[json_path.name] = str(json_path)
 
     summary_dict = data.get("summary", {})
     total_val_str = "0"
-    # Search all possible total keys in summary
     for tk in ["total_cost", "grand_total", "total_amount_due", "total_balance_due", "amount_due", "total_amount"]:
         val = summary_dict.get(tk) or summary_dict.get(tk.upper())
         if val:
             total_val_str = val
             break
-            
-    try:
-        # Clean string: remove $, commas, etc.
-        numeric_total = float(re.sub(r'[^0-9\.]', '', str(total_val_str)))
-    except:
-        numeric_total = 0.0
-
-    mode_label = "Standard Mode"
+    try: numeric_total = float(re.sub(r'[^0-9\.]', '', str(total_val_str)))
+    except: numeric_total = 0.0
 
     return {
-        "status":         "success",
-        "type":           "INVOICE",
-        "sub_type":       sub_type,
-        "sub_type_label": mode_label,
-        "employee_count": emp_count,
-        "fields_in_excel": active_fields,
-        "summary":        summary_dict,
-        "excel_file":     xlsx_path.name,
-        "json_file":      json_path.name,
-        "output_file":    xlsx_path.name,
-        "output_json":    json_path.name,
-        "total_value":    numeric_total,
-        "excel_url":      f"/api/download/{xlsx_path.name}",
-        "json_url":       f"/api/download/{json_path.name}",
-        "analysis_file":  analysis_file_name,
-        "analysis_url":   f"/api/download/{analysis_file_name}" if analysis_file_name else None,
-        "employees":      [
-            {col: emp.get(col.lower(), "") for col in active_fields}
-            for emp in data.get("employees", [])
-        ],
+        "status": "success", "type": "INVOICE", "sub_type": sub_type, "sub_type_label": "Standard Mode",
+        "employee_count": emp_count, "fields_in_excel": active_fields, "summary": summary_dict,
+        "excel_file": xlsx_path.name, "json_file": json_path.name, 
+        "excel_path": str(xlsx_path.absolute()), "json_path": str(json_path.absolute()),
+        "output_file": xlsx_path.name,
+        "output_json": json_path.name, "total_value": numeric_total,
+        "excel_url": f"/api/download/{xlsx_path.name}", "json_url": f"/api/download/{json_path.name}",
+        "analysis_file": analysis_file_name, "analysis_url": f"/api/download/{analysis_file_name}" if analysis_file_name else None,
+        "employees": [{col: emp.get(col.lower(), "") for col in active_fields} for emp in data.get("employees", [])],
     }
+
+@app.post("/api/extract")
+async def extract(file: UploadFile = File(...)):
+    print(f"\n[RPVE] Extraction Mode -> Standard")
+    if not file.filename:
+        raise HTTPException(400, "No filename provided")
+    ext = Path(file.filename).suffix.lower()
+    if ext not in [".pdf", ".csv", ".xlsx", ".xls"]:
+        raise HTTPException(400, f"Supported formats: PDF, CSV, XLSX, XLS. Got: {ext}")
+
+    unique_id = uuid.uuid4().hex[:8]
+    timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
+    safe_filename = re.sub(r'[\\/:*?\"<>|]', '_', file.filename)
+    filename_unique = f"{unique_id}_{timestamp_str}_{safe_filename}"
+    file_path = UPLOAD_DIR / filename_unique
+    
+    with open(file_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+    
+    try:
+        return await process_invoice_data(file_path, file.filename)
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+@app.post("/api/process-flow")
+async def process_flow(files: list[UploadFile] = File(...)):
+    print(f"\n[RPVE] Processing Flow with {len(files)} files")
+    import sys
+    if str(BASE_DIR) not in sys.path:
+        sys.path.append(str(BASE_DIR))
+    
+    try:
+        import flow_orchestrator
+    except ImportError as e:
+        raise HTTPException(500, f"Error importing flow orchestrator: {e}")
+
+    pdf_file = None
+    excel_files = []
+    
+    for file in files:
+        if not file.filename: continue
+        ext = Path(file.filename).suffix.lower()
+        
+        unique_id = uuid.uuid4().hex[:8]
+        timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
+        safe_filename = re.sub(r'[\\/:*?\"<>|]', '_', file.filename)
+        filename_unique = f"{unique_id}_{timestamp_str}_{safe_filename}"
+        file_path = UPLOAD_DIR / filename_unique
+        
+        with open(file_path, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+            
+        if ext == ".pdf":
+            pdf_file = file_path
+        elif ext in [".xlsx", ".xls"]:
+            excel_files.append(file_path)
+
+    if not pdf_file or not excel_files:
+        raise HTTPException(400, "Please upload at least one PDF and one Excel template.")
+        
+    try:
+        ref_census = excel_files[1] if len(excel_files) > 1 else None
+        result = await flow_orchestrator.run_flow(str(pdf_file), str(excel_files[0]), str(ref_census) if ref_census else None)
+        return result
+    except Exception as e:
+        raise HTTPException(500, str(e))
 
 
 @app.get("/api/download/{filename}", include_in_schema=False)

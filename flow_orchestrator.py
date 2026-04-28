@@ -1,0 +1,238 @@
+import sys
+import subprocess
+import os
+from pathlib import Path
+from datetime import datetime
+import pandas as pd
+import asyncio
+
+# Set up paths
+CURRENT_DIR = Path(__file__).parent.absolute()
+sys.path.append(str(CURRENT_DIR))
+
+try:
+    import RPVE_standalone
+    from RPVE_standalone import process_invoice_data, OUTPUT_DIR
+except ImportError as e:
+    print(f"Error: Could not import RPVE_standalone.py. {e}")
+    print(f"Current directory: {os.getcwd()}")
+    print(f"Script directory: {CURRENT_DIR}")
+    sys.exit(1)
+
+def ensure_xlsx(file_path: str) -> str:
+    """If file is .xls, convert to .xlsx using pandas and return new path."""
+    if not file_path or not file_path.lower().endswith(".xls"):
+        return file_path
+        
+    print(f"    -> Converting old .xls format to .xlsx: {Path(file_path).name}")
+    try:
+        new_path = str(Path(file_path).with_suffix(".xlsx"))
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            xl = pd.ExcelFile(file_path)
+            with pd.ExcelWriter(new_path, engine='openpyxl') as writer:
+                for sheet_name in xl.sheet_names:
+                    df = pd.read_excel(file_path, sheet_name=sheet_name, header=None)
+                    df.to_excel(writer, sheet_name=sheet_name, index=False, header=False)
+        return new_path
+    except Exception as e:
+        print(f"    -> Warning: Failed to convert .xls: {e}")
+        return file_path
+
+def classify_excel_template(excel_path: Path) -> str:
+    """Scans the first 25 rows of an Excel file to fingerprint its Type."""
+    try:
+        # Suppress warnings for xls files
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            df = pd.read_excel(excel_path, nrows=25, header=None)
+        all_text = " ".join([str(val).lower() for val in df.values.flatten() if pd.notna(val)])
+        
+        # Type 1 Detection (Engage/Kaiser)
+        if "ee row" in all_text or "relation-ship to employee" in all_text or "kaiser networks" in all_text:
+            return "type1"
+            
+        # Type 3 Detection (RAPT Blue Headers)
+        elif "data row" in all_text or "cobra participant" in all_text:
+            return "type3"
+            
+        # Type 2 Detection (Basic Titan Intake / Generic Census)
+        # Type 2 (`fill_template.py`) is designed as a fully dynamic universal filler.
+        elif "first name" in all_text or "last name" in all_text or "name" in all_text:
+            return "type2"
+            
+        # Default fallback to type2 because it uses dynamic column header mapping
+        # and works for almost any standard census layout.
+        return "type2"
+    except Exception as e:
+        print(f"Error reading Excel: {e}")
+        return "type2"  # Fallback to dynamic filler instead of crashing
+
+async def run_flow(pdf_path: str, template_path: str, ref_census_path: str = None):
+    print(f"--- Starting End-to-End RPVE Flow ---")
+    
+    # ── PHASE 1: PDF Extraction ───────────────────────────────────────────────
+    print(f"\n[1] Running Phase 1 (Extraction) on: {pdf_path}")
+    try:
+        p_path = Path(pdf_path)
+        result_data = await process_invoice_data(p_path, p_path.name)
+        phase1_output_excel = result_data['excel_path']
+        print(f"    -> Phase 1 Success! Extracted: {phase1_output_excel}")
+        
+        output_dir = Path(phase1_output_excel).parent
+        timestamp  = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+        phase2_report_name    = f"FINAL_AUDIT_REPORT_{timestamp}.xlsx"
+        phase2_report_path    = output_dir / phase2_report_name
+
+        validated_report_name = f"VALIDATED_AUDIT_REPORT_{timestamp}.xlsx"
+        validated_report_path = output_dir / validated_report_name
+        
+    except Exception as e:
+        print(f"    -> Phase 1 Failed: {e}")
+        import traceback
+        traceback.print_exc()
+        traceback.print_exc()
+        traceback.print_exc()
+        return
+    
+    # ── PHASE 1.5: Pre-process Templates (.xls -> .xlsx) ──────────────────────
+    template_path   = ensure_xlsx(template_path)
+    ref_census_path = ensure_xlsx(ref_census_path)
+
+    # ── PHASE 2: Template Fill ────────────────────────────────────────────────
+    print(f"\n[2] Analyzing Template: {template_path}")
+    
+    template_type = classify_excel_template(Path(template_path))
+    
+    if ref_census_path:
+        ref_type = classify_excel_template(Path(ref_census_path))
+        # Intelligence: If the User put the RAPT template in the 'Reference' box
+        # and a generic census in the 'Template' box, swap them!
+        if ref_type == "type3" and template_type != "type3":
+            print(f"    -> Swap detected: User put RAPT file in Reference slot. Swapping roles...")
+            template_path, ref_census_path = ref_census_path, template_path
+            template_type = "type3"
+        elif ref_census_path:
+            template_type = "type3" # Force type3 if we have 3 files and no swap found
+            
+        print(f"    -> Detected Template Type: {template_type.upper()} (3-file flow)")
+    else:
+        print(f"    -> Detected Template Type: {template_type.upper()}")
+    
+    print(f"\n[3] Executing Phase 2 (Template Fill)...")
+    phase2_base = Path(__file__).parent / "phase_2" / "template_fill"
+    
+    if template_type == "type1":
+        script = phase2_base / "type1" / "fill_template_v2.py"
+        cmd = [sys.executable, str(script), phase1_output_excel, template_path, str(phase2_report_path)]
+        
+    elif template_type == "type2":
+        script = phase2_base / "type2" / "fill_template.py"
+        cmd = [sys.executable, str(script), phase1_output_excel, template_path, str(phase2_report_path)]
+        
+    elif template_type == "type3":
+        if not ref_census_path:
+            default_ref = phase2_base / "type3" / "reference_census" / "TEPCensus.xlsx"
+            if default_ref.exists():
+                ref_census_path = str(default_ref)
+            else:
+                print("Error: Type 3 requires a Reference Census file!")
+                return
+        script = phase2_base / "type3" / "fill_template.py"
+        cmd = [sys.executable, str(script), phase1_output_excel, ref_census_path, template_path, str(phase2_report_path)]
+        
+    else:
+        print("Error: Could not identify the Excel template type.")
+        return
+
+    print(f"    Running command: {' '.join(cmd)}")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    
+    if result.returncode != 0:
+        print("\n--- Flow Failed in Phase 2 ---")
+        print(result.stderr)
+        raise Exception(f"Phase 2 failed: {result.stderr}")
+
+    print("    -> Phase 2 (Census Fill) Success!")
+    if result.stdout:
+        print(result.stdout)
+
+    # ── PHASE 3: Data Validation (Name Normalisation + Fuzzy Resolve) ─────────
+    print(f"\n[4] Executing Phase 3 (Data Validation — Name Normalisation)...")
+    validation_script = phase2_base / "data_validation.py"
+
+    if not validation_script.exists():
+        print(f"    [WARN] data_validation.py not found at {validation_script}. Skipping Phase 3.")
+        validated_report_path = phase2_report_path
+        validated_report_name = phase2_report_name
+    else:
+        val_cmd = [
+            sys.executable, str(validation_script),
+            str(phase2_report_path),      # filled census (Phase 2 output)
+            phase1_output_excel,          # invoice extraction (Phase 1 output)
+            str(validated_report_path),   # validated output (Phase 3 final)
+            "--threshold", "85",          # fuzzy match confidence threshold
+        ]
+        print(f"    Running command: {' '.join(val_cmd)}")
+        val_result = subprocess.run(val_cmd, capture_output=True, text=True)
+
+        if val_result.returncode == 0:
+            print("    -> Phase 3 (Data Validation) Success!")
+            if val_result.stdout:
+                print(val_result.stdout)
+        else:
+            # Phase 3 failure is non-fatal — fall back to Phase 2 output
+            print(f"    [WARN] Phase 3 failed (non-fatal). Using Phase 2 output as final.")
+            print(val_result.stderr)
+            validated_report_path = phase2_report_path
+            validated_report_name = phase2_report_name
+
+    # ── Register all 3 outputs in backend download cache ─────────────────────
+    if 'RPVE_standalone' in sys.modules:
+        _standalone = sys.modules['RPVE_standalone']
+        if hasattr(_standalone, '_cache'):
+            _standalone._cache[Path(phase1_output_excel).name] = str(Path(phase1_output_excel).absolute())
+            if phase2_report_path.exists():
+                _standalone._cache[phase2_report_name] = str(phase2_report_path.absolute())
+            if validated_report_path.exists():
+                _standalone._cache[validated_report_name] = str(validated_report_path.absolute())
+
+    # ── Build merged result — Phase 3 is the primary download ────────────────
+    merged_result = result_data.copy()
+
+    # Primary frontend output = Phase 3 validated Excel
+    final_path = validated_report_path if validated_report_path.exists() else phase2_report_path
+    final_name = validated_report_name if validated_report_path.exists() else phase2_report_name
+
+    merged_result["output_file"]       = final_name
+    merged_result["excel_file"]        = final_name
+    merged_result["excel_url"]         = f"/api/download/{final_name}"
+    merged_result["final_report_path"] = str(final_path.absolute())
+
+    # All 3 Excels exposed individually for the UI
+    merged_result["phase1_invoice_excel"]         = Path(phase1_output_excel).name
+    merged_result["phase1_invoice_excel_url"]     = f"/api/download/{Path(phase1_output_excel).name}"
+    merged_result["phase2_filled_census"]         = phase2_report_name
+    merged_result["phase2_filled_census_url"]     = f"/api/download/{phase2_report_name}"
+    merged_result["phase3_validated_census"]      = validated_report_name
+    merged_result["phase3_validated_census_url"]  = f"/api/download/{validated_report_name}"
+
+    print("\n--- Flow Completed Successfully! ---")
+    print(f"  Excel 1 — Invoice Extraction : {Path(phase1_output_excel).name}")
+    print(f"  Excel 2 — Filled Census      : {phase2_report_name}")
+    print(f"  Excel 3 — Validated Census   : {validated_report_name}")
+    return merged_result
+
+
+if __name__ == "__main__":
+    import asyncio
+    if len(sys.argv) < 3:
+        print("Usage: python flow_orchestrator.py <pdf_path> <template_excel> [ref_census_excel]")
+    else:
+        pdf = sys.argv[1]
+        template = sys.argv[2]
+        ref = sys.argv[3] if len(sys.argv) > 3 else None
+        asyncio.run(run_flow(pdf, template, ref))

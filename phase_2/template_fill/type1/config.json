@@ -1,0 +1,16 @@
+{
+  "source_sheet": "Census",
+  "form_sheet": "Employee Details",
+  "match_field": "full name",
+  "form_name_column": "A",
+  "form_start_row": 22,
+  "fuzzy_match": true,
+  "fuzzy_threshold": 0.8,
+  "fields": [
+    {"source": "first name", "form_column": "B", "description": "First Name"},
+    {"source": "last name", "form_column": "C", "description": "Last Name"},
+    {"source": "plan type", "form_column": "M", "description": "Plan Type"},
+    {"source": "plan name", "form_column": "N", "description": "Current Plan Description"},
+    {"source": "current premium", "form_column": "O", "description": "Monthly Total Premium"}
+  ]
+}
