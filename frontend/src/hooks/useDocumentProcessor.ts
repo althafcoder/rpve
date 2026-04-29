@@ -81,7 +81,18 @@ export function useDocumentProcessor() {
                 isSimulationRunning = false;
 
                 if (!response.ok) {
-                    throw new Error(`Server error: ${response.statusText}`);
+                    let errorMsg = response.statusText;
+                    try {
+                        const errorJson = await response.json();
+                        if (errorJson.detail) {
+                            errorMsg = errorJson.detail;
+                        } else if (errorJson.error) {
+                            errorMsg = errorJson.error;
+                        }
+                    } catch (e) {
+                        // Fallback to statusText if body is not JSON or doesn't have detail
+                    }
+                    throw new Error(`Server error: ${errorMsg}`);
                 }
 
                 const json = await response.json();

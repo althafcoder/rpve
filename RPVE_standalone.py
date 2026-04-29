@@ -35,6 +35,11 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 load_dotenv()
+POPPLER_PATH = os.getenv("POPPLER_PATH")
+if POPPLER_PATH and os.path.exists(POPPLER_PATH):
+    if POPPLER_PATH not in os.environ["PATH"]:
+        os.environ["PATH"] += os.pathsep + POPPLER_PATH
+    print(f"[RPVE] Poppler path added to PATH: {POPPLER_PATH}")
 
 BASE_DIR   = Path(__file__).parent
 UPLOAD_DIR = BASE_DIR / "rpve_uploads"
@@ -107,6 +112,39 @@ KEYWORDS = {
 
 PROMPTS = {
 
+    "deduction_roster": """
+You are extracting data from a BENEFIT DEDUCTION ROSTER.
+
+Extract a SUMMARY and EMPLOYEES array.
+
+SUMMARY: company_name, invoice_number, billing_date, total_amount_due
+
+EMPLOYEE RECORDS:
+For each employee plan line, you MUST extract:
+  first_name: member first name
+  last_name: member last name  
+  coverage: coverage level (e.g. EE, ES, FAM, EC)
+  plan_name: the "Plan Description" column value
+  current_premium: YOU MUST TAKE THE VALUE FROM THE "Monthly Premium Total" COLUMN.
+  
+🔹 CRITICAL RULE:
+There are two "Total" columns: "Monthly Premium Total" and "Pay Period Amount Total".
+YOU MUST USE THE "Monthly Premium Total".
+DO NOT USE THE "Pay Period Amount Total".
+
+Example:
+If a row shows "525.00" under Monthly Premium Total and "262.50" under Pay Period Amount Total, current_premium MUST BE "525.00".
+
+Use "" for missing values. Return ONLY valid JSON.
+
+{
+  "summary": {"company_name":"","invoice_number":"","billing_date":"","total_amount_due":""},
+  "employees": [{"first_name":"","last_name":"","coverage":"","plan_name":"","current_premium":""}]
+}
+
+PDF TEXT: {text}
+""",
+
     "engage": """
 You are extracting data from a group health insurance invoice (ADP TotalSource, ACSA, or similar).
 
@@ -138,6 +176,7 @@ EXTRACTION RULES:
 3. ROSTER FORMAT: Extract each employee plan line with individual costs
 4. FINANCIAL DATA: Prior balance, adjustments, current cost, admin fees, total due
 5. DATES: Billing date, due date, billing period
+6. BENEFIT DEDUCTION ROSTER: If the document is titled "BENEFIT DEDUCTION ROSTER", you MUST extract the value from the "Monthly Premium" -> "Total" column as the `current_premium`. STRICTLY FORBIDDEN: Do NOT use the "Pay Period Amount" values for the premium.
 
 Use "" for missing values. Return ONLY valid JSON.
 
@@ -148,9 +187,6 @@ Use "" for missing values. Return ONLY valid JSON.
 
 PDF TEXT: {text}
 """,
-
-    # All other prompts are removed. The generic prompt is now the main fallback
-    # in the `extract_with_llm` function itself.
 
 }
 
@@ -542,6 +578,11 @@ def classify(text: str) -> str:
     """Classifies the document for extraction type."""
     t = text.upper()
     
+    # Priority 0: Check for Benefit Deduction Roster
+    if "BENEFIT DEDUCTION ROSTER" in t:
+        print("[RPVE] Detected Benefit Deduction Roster format.")
+        return "deduction_roster"
+
     # Priority 1: Check for ADP/TotalSource (original engage)
     if "TOTALSOURCE" in t or "ADP" in t:
         print("[RPVE] Detected ADP TotalSource format.")
@@ -652,9 +693,9 @@ Names are often printed as "LastName, FirstName" or "LastName, FirstName Middle"
 - middal_name (Middle Name)
 - last_name
 - coverage (e.g. ES / EC / FAM / EE / SP / CH)
-- plan_name (FULL plan/product description — do NOT truncate) eg : "coverage_option"- ConnectiCare Medical FlexPOS 5000
+- plan_name (FULL plan/product description — do NOT truncate). IMPORTANT: Plan names often wrap across multiple lines. You MUST concatenate these into a single string (e.g., "Non-Contributory 25K Flat Basic Life EE Only").
 - plan_type (insurance category: Medical, Dental, Vision, etc.)
-- current_premium: The individual plan line cost for that specific plan row. (**CRITICAL FOR UHC/UHC NA**: ALWAYS use the "Totals -> Total" column value from the far-right. DO NOT use "Charge Amount".)
+- current_premium: The individual plan line cost for that specific plan row. (**CRITICAL FOR UHC/UHC NA**: Use the "Totals -> Total" column for single-line rows, but use "Charge Amount" if multiple distinct plan rows exist for the same member.)
 - adjustment_amount: Any adjustment amount listed.
 - birth_date
 - gender (M / F — infer if not present)
@@ -703,10 +744,11 @@ Names are often printed as "LastName, FirstName" or "LastName, FirstName Middle"
 - If the document lacks an explicit 'Coverage' column or it is blank, YOU MUST INFER the coverage tier from the relationship or enrollee type (e.g. 'EE', 'Subscriber' -> EE, 'SP', 'Spouse' -> ES).
 
 🔹 UNITEDHEALTHCARE (UHC / UHC NA) SPECIAL RULE (CRITICAL):
-- **ALWAYS extract the value from the far-right "Totals -> Total" column as the `current_premium`.**
-- **STRICTLY FORBIDDEN:** Do NOT use the "Charge Amount" column under "Current Detail" for the premium value on these forms. 
-- **MANDATORY:** You MUST ignore the "Charge Amount" column and use the far-right "Totals -> Total" column for every member.
-- **EXAMPLE:** For a row containing "$1,718.41 [other values] $1,718.41 $3,436.82", the `current_premium` MUST BE "$3,436.82". 
+- **SUMMARY VS DETAIL:** UHC invoices often have a "Summary" page with plan totals. **DO NOT** use plan names from the summary page for individual records. You MUST extract employee data exclusively from the "Details" section.
+- **MULTI-PLAN ROSTER:** If an employee has multiple DIFFERENT plan lines (e.g., Dental, Vision, Life, Medical) listed as separate rows in the Details, you MUST extract EACH row as a separate record.
+- **PREMIUM SELECTION:** Use the individual "Charge Amount" for each line's `current_premium` in multi-line cases. ONLY use the far-right "Totals -> Total" for single-line forms.
+- **PLAN NAME ALIGNMENT:** Capture the EXACT, UNIQUE plan name from the "Plan" column for every row. **STRICTLY FORBIDDEN:** Do NOT repeat a single plan name (like "AD&D") as a global reference for all members.
+- **$250 THRESHOLD (CRITICAL):** Any plan line with a premium less than $250 (e.g., Vision, Life, or minor adjustments) is considered auxiliary. You MUST still extract them accurately, but they will be categorized as analysis data.
 - **ADJUSTMENT HANDLING:** Set `adjustment_amount` to NULL/Empty for these rows if the adjustment is already included in the "Total" value you mapped to `current_premium`.
 
 🔹 Coverage Recovery  : Map coverage type codes using the following legend for ALL UHC documents:
@@ -730,8 +772,10 @@ Names are often printed as "LastName, FirstName" or "LastName, FirstName Middle"
   "employees": [{"full_name": null, "first_name": null, "middal_name": null, "last_name": null, "coverage": null, "plan_name": null, "plan_type": null, "current_premium": null, "adjustment_amount": null, "birth_date": null, "gender": null, "home_zip_code": null, "billing_period": null}]
 }
 
-🔹 SPECIAL CASE - PAYROLL / DEDUCTION REGISTERS (e.g. WARWICK):
-If column headers include "Pay Date", "Deduction Date", or "Check Date", you MUST extract this into the `billing_period` field for EVERY row. This is critical for differentiating recurring weekly/bi-weekly deductions.
+🔹 SPECIAL CASE - PAYROLL / DEDUCTION REGISTERS (e.g. WARWICK / BENEFIT DEDUCTION ROSTER):
+- If column headers include "Pay Date", "Deduction Date", or "Check Date", you MUST extract this into the `billing_period` field for EVERY row.
+- **BENEFIT DEDUCTION ROSTER SPECIFIC (CRITICAL):** If the document is titled "BENEFIT DEDUCTION ROSTER", you MUST extract the value from the "Monthly Premium" -> "Total" column as the `current_premium`. 
+- **STRICTLY FORBIDDEN:** Do NOT use the "Pay Period Amount" column values for the premium. Always use the monthly total.
 
 PDF TEXT: {{text}}
 """
@@ -1245,9 +1289,11 @@ async def process_invoice_data(file_path: Path, original_filename: str):
             val_str = str(emp.get("current_premium") or "").replace("$", "").replace(",", "")
             try: premium_val = round(float(re.sub(r'[^\d.-]', '', val_str)), 2)
             except: premium_val = 0.0
-            is_datalink_emi = sub_type == "datalink_emi"
-            if premium_val < 250 and not is_uhc and not is_excel and not is_datalink_emi: analysis_data.append(emp)
-            else: final_employees.append(emp)
+            # apply the $250 rule to ALL document types (including UHC, Excel, and Data Link)
+            if premium_val < 250:
+                analysis_data.append(emp)
+            else:
+                final_employees.append(emp)
         data["employees"] = final_employees
 
         xlsx_path = build_excel(data, sub_type, stem, active_employee_fields=active_fields, out_dir=run_out_dir)
@@ -1314,44 +1360,51 @@ async def extract(file: UploadFile = File(...)):
 
 @app.post("/api/process-flow")
 async def process_flow(files: list[UploadFile] = File(...)):
-    print(f"\n[RPVE] Processing Flow with {len(files)} files")
-    import sys
-    if str(BASE_DIR) not in sys.path:
-        sys.path.append(str(BASE_DIR))
-    
     try:
-        import flow_orchestrator
-    except ImportError as e:
-        raise HTTPException(500, f"Error importing flow orchestrator: {e}")
+        print(f"\n[RPVE] Processing Flow with {len(files)} files")
+        import sys
+        if str(BASE_DIR) not in sys.path:
+            sys.path.append(str(BASE_DIR))
+        
+        try:
+            import flow_orchestrator
+        except ImportError as e:
+            raise HTTPException(500, f"Error importing flow orchestrator: {e}")
 
-    pdf_file = None
-    excel_files = []
-    
-    for file in files:
-        if not file.filename: continue
-        ext = Path(file.filename).suffix.lower()
+        pdf_file = None
+        excel_files = []
         
-        unique_id = uuid.uuid4().hex[:8]
-        timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
-        safe_filename = re.sub(r'[\\/:*?\"<>|]', '_', file.filename)
-        filename_unique = f"{unique_id}_{timestamp_str}_{safe_filename}"
-        file_path = UPLOAD_DIR / filename_unique
-        
-        with open(file_path, "wb") as f:
-            shutil.copyfileobj(file.file, f)
+        for file in files:
+            if not file.filename: continue
+            ext = Path(file.filename).suffix.lower()
             
-        if ext == ".pdf":
-            pdf_file = file_path
-        elif ext in [".xlsx", ".xls"]:
-            excel_files.append(file_path)
+            unique_id = uuid.uuid4().hex[:8]
+            timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
+            safe_filename = re.sub(r'[\\/:*?\"<>|]', '_', file.filename)
+            filename_unique = f"{unique_id}_{timestamp_str}_{safe_filename}"
+            file_path = UPLOAD_DIR / filename_unique
+            
+            with open(file_path, "wb") as f:
+                shutil.copyfileobj(file.file, f)
+                
+            if ext == ".pdf":
+                pdf_file = file_path
+            elif ext in [".xlsx", ".xls"]:
+                excel_files.append(file_path)
 
-    if not pdf_file or not excel_files:
-        raise HTTPException(400, "Please upload at least one PDF and one Excel template.")
-        
-    try:
-        ref_census = excel_files[1] if len(excel_files) > 1 else None
-        result = await flow_orchestrator.run_flow(str(pdf_file), str(excel_files[0]), str(ref_census) if ref_census else None)
-        return result
+        if not pdf_file or not excel_files:
+            raise HTTPException(400, "Please upload at least one PDF and one Excel template.")
+            
+        try:
+            ref_census = excel_files[1] if len(excel_files) > 1 else None
+            result = await flow_orchestrator.run_flow(str(pdf_file), str(excel_files[0]), str(ref_census) if ref_census else None)
+            return result
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            if isinstance(e, HTTPException):
+                raise e
+            raise HTTPException(500, str(e))
     except Exception as e:
         raise HTTPException(500, str(e))
 
