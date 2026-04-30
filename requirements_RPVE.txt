@@ -12,3 +12,4 @@ pymupdf
 pytesseract
 pillow
 xlrd
+rostaing-ocr

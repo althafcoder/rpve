@@ -285,7 +285,14 @@ def _find_columns(ws) -> dict[str, int | None]:
             for c in range(1, ws.max_column + 1)
         }
         joined = " ".join(row_vals.values())
-        if not any(k in joined for k in ('name', 'employee', 'first')):
+        # Robust detection: must have a name-like column AND some context
+        has_first = 'first' in joined
+        has_name  = 'name' in joined
+        has_disc  = 'discrep' in joined
+        
+        # We accept the row if it has 'First' OR if it has 'Name' along with 'Employee' or 'Discrepancies'
+        # This ensures we don't trip on a title row that just says "Employee List"
+        if not (has_first or (has_name and (has_disc or 'employee' in joined))):
             continue
 
         for c, v in row_vals.items():

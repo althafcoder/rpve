@@ -743,14 +743,23 @@ Names are often printed as "LastName, FirstName" or "LastName, FirstName Middle"
 🔹 COVERAGE FALLBACK (e.g. BLUECROSS):
 - If the document lacks an explicit 'Coverage' column or it is blank, YOU MUST INFER the coverage tier from the relationship or enrollee type (e.g. 'EE', 'Subscriber' -> EE, 'SP', 'Spouse' -> ES).
 
-🔹 UNITEDHEALTHCARE (UHC / UHC NA) SPECIAL RULE (CRITICAL):
-- **SUMMARY VS DETAIL:** UHC invoices often have a "Summary" page with plan totals. **DO NOT** use plan names from the summary page for individual records. You MUST extract employee data exclusively from the "Details" section.
-- **MULTI-PLAN ROSTER:** If an employee has multiple DIFFERENT plan lines (e.g., Dental, Vision, Life, Medical) listed as separate rows in the Details, you MUST extract EACH row as a separate record.
-- **PREMIUM SELECTION:** Use the individual "Charge Amount" for each line's `current_premium` in multi-line cases. ONLY use the far-right "Totals -> Total" for single-line forms.
-- **PLAN NAME ALIGNMENT:** Capture the EXACT, UNIQUE plan name from the "Plan" column for every row. **STRICTLY FORBIDDEN:** Do NOT repeat a single plan name (like "AD&D") as a global reference for all members.
-- **$250 THRESHOLD (CRITICAL):** Any plan line with a premium less than $250 (e.g., Vision, Life, or minor adjustments) is considered auxiliary. You MUST still extract them accurately, but they will be categorized as analysis data.
-- **ADJUSTMENT HANDLING:** Set `adjustment_amount` to NULL/Empty for these rows if the adjustment is already included in the "Total" value you mapped to `current_premium`.
+🔹# CORRECTED UHC PREMIUM SELECTION RULE
 
+# CASE 1: Employee has PAIRED lines (Max Claims Liability + Admin/Excess Loss 
+# under the SAME plan group/policy)
+#   → current_premium = the shared "Total" column value (e.g., $742.11)
+#   → Apply the SAME Total to BOTH rows for that employee
+#   → Do NOT use individual Charge Amounts ($399.09 / $343.02)
+
+# CASE 2: Employee has a SINGLE line (no paired Admin/Excess Loss line)
+#   → current_premium = the "Total" column value (same as before)
+
+# CASE 3: Adjustment rows (negative values like -$742.11 for TRM status)
+#   → Map to adjustment_amount, NOT current_premium
+#   → current_premium = NULL for terminated rows
+
+# FORBIDDEN: Never use raw Charge Amount as current_premium
+#            when a Total column value is present for that employee group
 🔹 Coverage Recovery  : Map coverage type codes using the following legend for ALL UHC documents:
     - `E` or "Employee Only" → **EE**
     - `ES` or "Employee and Spouse" → **ES**

@@ -430,7 +430,7 @@ def _parse_row_per_person(df: pd.DataFrame, col_map: dict) -> dict:
         )
         is_dependent = (
             any(kw in cov_lower for kw in _DEP_KEYWORDS)
-            or (_get_val(row, col_map, 'dep_rel') != '')  # has explicit relation column
+            or (_get_val(row, col_map, 'dep_rel') != '' and not is_employee)  # Fix: don't flag EE as Dep
             or (not cov_raw and current_emp is not None)  # blank after employee → dep
         )
         is_wc_only = cov_clean in ('wc', 'workcomp', 'workerscomp')
