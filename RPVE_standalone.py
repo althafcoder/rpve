@@ -101,7 +101,7 @@ HEADER_COLOURS = {
 # Simplified to identify ADP ("engage") and ACSA documents.
 KEYWORDS = {
     "engage": ["TOTALSOURCE", "TOTALSOURCE BENEFITS INVOICE", "TOTALSOURCE® BENEFITS INVOICE", "NCT3-EPO", "ADP", "ADP, INC", 
-               "ASSOCIATION OF COMMUNITY SERVICE", "ACSA", "ACSA GROUP INSURANCE"],
+               "ASSOCIATION OF COMMUNITY SERVICE", "ACSA", "ACSA GROUP INSURANCE", "HEALTHNET", "HEALTH NET"],
     # Data Link EMI carrier
     "datalink_emi": ["DATA LINK EMI", "DATALINK EMI", "DATALINKEMI"],
 }
@@ -430,8 +430,17 @@ def extract_text(pdf_path: Path, max_pages: int = 1000) -> str:
         
         print(f"[RPVE] Triggering high-accuracy fallback: {reason}")
         rostaing_text = extract_text_with_rostaing(pdf_path)
+        
+        # ── INTELLIGENT FALLBACK VALIDATION ───────────────────────────
+        # Only use Rostaing text if it's actually "better" or at least 
+        # comparable in volume. If Rostaing fails on rotated pages 
+        # (producing less text than standard), we stick to standard.
         if rostaing_text and rostaing_text.strip():
-            return rostaing_text
+            if len(rostaing_text) >= (len(text) * 0.8):
+                print(f"[RPVE] Using Rostaing OCR result ({len(rostaing_text)} chars).")
+                return rostaing_text
+            else:
+                print(f"[RPVE] Rostaing result suspiciously short ({len(rostaing_text)} vs {len(text)}). Sticking to standard extraction.")
 
     return text
 
@@ -786,7 +795,7 @@ Names are often printed as "LastName, FirstName" or "LastName, FirstName Middle"
 - **BENEFIT DEDUCTION ROSTER SPECIFIC (CRITICAL):** If the document is titled "BENEFIT DEDUCTION ROSTER", you MUST extract the value from the "Monthly Premium" -> "Total" column as the `current_premium`. 
 - **STRICTLY FORBIDDEN:** Do NOT use the "Pay Period Amount" column values for the premium. Always use the monthly total.
 
-PDF TEXT: {{text}}
+PDF TEXT: {text}
 """
 
     lines = text.split('\n')
@@ -1420,12 +1429,32 @@ async def process_flow(files: list[UploadFile] = File(...)):
 
 @app.get("/api/download/{filename}", include_in_schema=False)
 async def download(filename: str):
-    fp = Path(_cache.get(filename, OUTPUT_DIR / filename))
-    if not fp.exists():
-        raise HTTPException(404, f"File not found: {filename}")
-    mt = ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-          if filename.endswith(".xlsx") else "application/json")
-    return FileResponse(path=fp, filename=filename, media_type=mt)
+    # 1. Try to get from in-memory cache
+    path_str = _cache.get(filename)
+    if path_str:
+        fp = Path(path_str)
+        if fp.exists():
+            mt = ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                  if filename.endswith(".xlsx") else "application/json")
+            return FileResponse(path=fp, filename=filename, media_type=mt)
+
+    # 2. If not in cache (e.g. server restarted), search subdirectories of OUTPUT_DIR
+    # This ensures files are still downloadable even after a reload.
+    matches = list(OUTPUT_DIR.rglob(filename))
+    if matches:
+        fp = matches[0]
+        mt = ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+              if filename.endswith(".xlsx") else "application/json")
+        return FileResponse(path=fp, filename=filename, media_type=mt)
+
+    # 3. Fallback to root of OUTPUT_DIR
+    fp = OUTPUT_DIR / filename
+    if fp.exists():
+        mt = ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+              if filename.endswith(".xlsx") else "application/json")
+        return FileResponse(path=fp, filename=filename, media_type=mt)
+        
+    raise HTTPException(404, f"File not found: {filename}")
 
 
 @app.get("/{filename}", include_in_schema=False)
@@ -1451,4 +1480,4 @@ if __name__ == "__main__":
     print(f"  UI      ->  http://localhost:{port}")
     print(f"  Swagger ->  http://localhost:{port}/docs")
     print("="*50 + "\n")
-    uvicorn.run("RPVE_standalone:app", host="0.0.0.0", port=port, reload=True)
+    uvicorn.run("RPVE_standalone:app", host="0.0.0.0", port=port, reload=True, reload_excludes=["rpve_uploads/*", "rpve_outputs/*", "*.log", "*.txt"])

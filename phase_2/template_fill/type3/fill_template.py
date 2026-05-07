@@ -226,6 +226,7 @@ def load_invoice(path: str) -> dict:
 _CENSUS_COL_RULES = {
     'insured':   ['insured name', 'insured'],                   # grouping key (TEPCensus)
     'emp_dep':   ['employee or dependent', 'emp or dep',        # row-type flag
+                  'employee (1)', 'dependent (0)',               # "*Employee (1) or Dependent (0)" format
                   'relationship type', 'member type'],
     'first':     ['first name', 'first', 'given name',
                   'employee name', 'employee  name'],           # first / given
@@ -393,11 +394,14 @@ def _parse_grouped(df: pd.DataFrame, col_map: dict) -> dict:
 def _parse_row_per_person(df: pd.DataFrame, col_map: dict) -> dict:
     """
     Row-per-person layout: each row is one person.
-    Employees identified by coverage code or absence of relation keyword.
+    Employees identified by:
+      1. emp_dep column (if available) — e.g. 'Employee' / 'Spouse' / 'Child'
+      2. Fallback: coverage code or absence of relation keyword
     Dependents follow the preceding employee row.
     """
     result      = {}
     current_emp = None
+    has_emp_dep = 'emp_dep' in col_map   # explicit Employee/Dependent marker column
 
     for _, row in df.iterrows():
         # Get name — prefer first+last split, fall back to fullname
@@ -423,16 +427,31 @@ def _parse_row_per_person(df: pd.DataFrame, col_map: dict) -> dict:
         dob      = row.get(col_map['dob']) if 'dob' in col_map else None
         zip_code = _get_val(row, col_map, 'zip')
 
-        # Is this row an employee or dependent?
-        is_employee  = (
-            cov_clean in _EMP_MARKERS
-            or (not cov_raw and current_emp is None)   # first row, no coverage → employee
-        )
-        is_dependent = (
-            any(kw in cov_lower for kw in _DEP_KEYWORDS)
-            or (_get_val(row, col_map, 'dep_rel') != '' and not is_employee)  # Fix: don't flag EE as Dep
-            or (not cov_raw and current_emp is not None)  # blank after employee → dep
-        )
+        # ── Employee / Dependent classification ──────────────────────
+        if has_emp_dep:
+            # PRIMARY: use explicit marker column (most reliable)
+            emp_dep_val = _get_val(row, col_map, 'emp_dep').lower().strip()
+            is_employee  = emp_dep_val in ('employee', '1', 'ee', 'subscriber',
+                                           'primary', 'insured', 'member')
+            is_dependent = emp_dep_val in ('spouse', 'child', 'dependent', '0',
+                                           'sp', 'ch', 'son', 'daughter',
+                                           'partner', 'domestic partner')
+            # Derive relation from emp_dep value directly
+            dep_relation = ('SP' if any(kw in emp_dep_val
+                            for kw in ('spouse', 'partner')) else 'CH')
+        else:
+            # FALLBACK: infer from coverage codes
+            is_employee  = (
+                cov_clean in _EMP_MARKERS
+                or (not cov_raw and current_emp is None)
+            )
+            is_dependent = (
+                any(kw in cov_lower for kw in _DEP_KEYWORDS)
+                or (_get_val(row, col_map, 'dep_rel') != '' and not is_employee)
+                or (not cov_raw and current_emp is not None)
+            )
+            dep_relation = None   # will be derived below
+
         is_wc_only = cov_clean in ('wc', 'workcomp', 'workerscomp')
 
         if is_wc_only:
@@ -452,15 +471,17 @@ def _parse_row_per_person(df: pd.DataFrame, col_map: dict) -> dict:
 
         elif is_dependent and current_emp is not None:
             dep_last = last or current_emp['last']
-            rel_val  = _get_val(row, col_map, 'dep_rel') or cov_raw
-            rel      = 'SP' if any(kw in rel_val.lower()
-                                   for kw in ('spouse', 'partner')) else 'CH'
+            if dep_relation is None:
+                # Fallback relation derivation from dep_rel or coverage
+                rel_val  = _get_val(row, col_map, 'dep_rel') or cov_raw
+                dep_relation = ('SP' if any(kw in rel_val.lower()
+                                for kw in ('spouse', 'partner')) else 'CH')
             if not any(d['first'] == first and d['last'] == dep_last
                        for d in current_emp['dependents']):
                 current_emp['dependents'].append({
                     'first': first, 'last': dep_last,
                     'gender': gender, 'dob': dob,
-                    'zip': current_emp['zip'], 'relation': rel,
+                    'zip': current_emp['zip'], 'relation': dep_relation,
                 })
 
     return result

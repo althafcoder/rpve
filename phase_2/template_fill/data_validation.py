@@ -206,7 +206,7 @@ def load_invoice_data(invoice_path: str | Path) -> dict[str, dict]:
     df = pd.read_excel(str(path), sheet_name=sheet, skiprows=hrow)
     df.columns = [str(c).strip() for c in df.columns]
 
-    # Column detection
+    # Column detection (case-insensitive)
     col_map: dict[str, str | None] = {
         'full': None, 'first': None, 'last': None,
         'plan': None, 'premium': None, 'coverage': None,
@@ -215,8 +215,8 @@ def load_invoice_data(invoice_path: str | Path) -> dict[str, dict]:
         cl = col.lower()
         if 'full' in cl and 'name' in cl:                  col_map['full']     = col
         elif 'employee' in cl and 'name' in cl:             col_map['full']     = col
-        elif 'first' in cl and 'name' in cl:                col_map['first']    = col
-        elif 'last' in cl and 'name' in cl:                 col_map['last']     = col
+        elif ('first' in cl or 'fname' in cl) and 'name' in cl: col_map['first']    = col
+        elif ('last' in cl or 'lname' in cl) and 'name' in cl:  col_map['last']     = col
         elif 'plan' in cl and ('name' in cl or 'desc' in cl): col_map['plan']   = col
         elif 'premium' in cl or 'current' in cl:            col_map['premium']  = col
         elif 'coverage' in cl or 'tier' in cl:              col_map['coverage'] = col
@@ -254,6 +254,7 @@ def load_invoice_data(invoice_path: str | Path) -> dict[str, dict]:
             'plan':     row.get(col_map['plan'])     if col_map['plan']     else None,
             'premium':  prem_raw,
             'coverage': row.get(col_map['coverage']) if col_map['coverage'] else None,
+            'tokens':   set(_tokens(raw_name)) # Store for Pass 2.5
         }
 
         # Register under every candidate key
@@ -273,45 +274,47 @@ def load_invoice_data(invoice_path: str | Path) -> dict[str, dict]:
 def _find_columns(ws) -> dict[str, int | None]:
     """
     Auto-detect key column positions from the header row of the filled Excel.
-    Returns a dict: {field: column_index (1-based)} or None if not found.
+    Searches for the row with the most keyword matches.
     """
-    cols: dict[str, int | None] = {
-        'name': None, 'first': None, 'last': None,
-        'plan': None, 'premium': None, 'disc': None,
-    }
+    best_cols = {}
+    best_score = -1
+    header_row = 1
+
     for r in range(1, 40):
         row_vals = {
             c: str(ws.cell(row=r, column=c).value or '').strip().lower()
-            for c in range(1, ws.max_column + 1)
+            for c in range(1, min(ws.max_column + 1, 50))
         }
         joined = " ".join(row_vals.values())
-        # Robust detection: must have a name-like column AND some context
-        has_first = 'first' in joined
-        has_name  = 'name' in joined
-        has_disc  = 'discrep' in joined
         
-        # We accept the row if it has 'First' OR if it has 'Name' along with 'Employee' or 'Discrepancies'
-        # This ensures we don't trip on a title row that just says "Employee List"
-        if not (has_first or (has_name and (has_disc or 'employee' in joined))):
-            continue
-
+        # Scoring this row as a potential header
+        score = 0
+        current_cols = {
+            'name': None, 'first': None, 'last': None,
+            'plan': None, 'premium': None, 'disc': None,
+        }
+        
         for c, v in row_vals.items():
             if   ('employee' in v and 'name' in v) or ('full' in v and 'name' in v):
-                cols['name']    = c
+                current_cols['name'] = c; score += 2
             elif 'first' in v and 'name' in v:
-                cols['first']   = c
-            elif 'last'  in v and 'name' in v:
-                cols['last']    = c
-            elif 'plan'  in v:
-                cols['plan']    = c
+                current_cols['first'] = c; score += 2
+            elif 'last' in v and 'name' in v:
+                current_cols['last'] = c; score += 2
+            elif 'plan' in v:
+                current_cols['plan'] = c; score += 1
             elif 'premium' in v:
-                cols['premium'] = c
+                current_cols['premium'] = c; score += 1
             elif 'discrep' in v:
-                cols['disc']    = c
+                current_cols['disc'] = c; score += 3 # High weight for validation column
+        
+        if score > best_score and (current_cols['first'] or current_cols['name']):
+            best_score = score
+            best_cols = current_cols
+            header_row = r
 
-        return cols  # found header row
-
-    return cols
+    best_cols['header_row'] = header_row
+    return best_cols
 
 
 def _get_name_from_row(ws, row_idx: int, cols: dict) -> str:
@@ -348,9 +351,18 @@ def match_name(
         return None, 'none', 0.0
 
     # --- Pass 1 & 2: exact canonical + token-swap ---
+    raw_toks = _tokens(raw_name)
+    raw_tok_set = set(raw_toks)
+    
     for key in lookup_keys(raw_name):
         if key in invoice_lookup:
             return invoice_lookup[key], 'canonical', 100.0
+
+    # --- Pass 2.5: Order-independent Token Set Match ---
+    # This catches "Garcia Eileen" vs "Eileen Garcia" perfectly.
+    for inv_key, entry in invoice_lookup.items():
+        if entry.get('tokens') == raw_tok_set:
+            return entry, 'token_swap', 100.0
 
     # --- Pass 3: fuzzy across all known keys ---
     best_score = 0.0
@@ -424,24 +436,7 @@ def run_validation(
 
     col_positions = _find_columns(ws)
     disc_col = col_positions.get('disc')
-    plan_col = col_positions.get('plan')
-    prem_col = col_positions.get('premium')
-
-    if disc_col is None:
-        logger.error("Discrepancies column not found in filled Excel.")
-        return {}
-
-    # Find data start row (row after header)
-    data_start = 2
-    for r in range(1, 40):
-        row_vals = {
-            c: str(ws.cell(row=r, column=c).value or '').strip().lower()
-            for c in range(1, ws.max_column + 1)
-        }
-        joined = " ".join(row_vals.values())
-        if any(k in joined for k in ('name', 'employee', 'first')):
-            data_start = r + 1
-            break
+    data_start = (col_positions.get('header_row') or 1) + 1
 
     # ------------------------------------------------------------------
     # Scan all rows for discrepancy flags

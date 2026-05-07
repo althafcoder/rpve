@@ -109,16 +109,58 @@ async def run_flow(pdf_path: str, template_path: str, ref_census_path: str = Non
     
     if ref_census_path:
         ref_type = classify_excel_template(Path(ref_census_path))
-        # Intelligence: If the User put the RAPT template in the 'Reference' box
-        # and a generic census in the 'Template' box, swap them!
-        if ref_type == "type3" and template_type != "type3":
-            print(f"    -> Swap detected: User put RAPT file in Reference slot. Swapping roles...")
+        
+        # ── ROBUST SWAP INTELLIGENCE ────────────────────────────────────────
+        t_name = Path(template_path).name.lower()
+        r_name = Path(ref_census_path).name.lower()
+        
+        print(f"    -> Swap Check: Template={t_name}, Ref={r_name}")
+        print(f"    -> Type Check: Template={template_type}, Ref={ref_type}")
+
+        swapped = False
+        # 1. Name-based hint: If the Reference slot contains "RAPT" and Template doesn't, swap.
+        if ("rapt" in r_name and "rapt" not in t_name) or ("template" in r_name and "template" not in t_name):
+            print(f"    -> Name-based Swap: User put RAPT/Template file in Reference slot. Swapping roles...")
+            template_path, ref_census_path = ref_census_path, template_path
+            # Re-classify after swap
+            template_type = classify_excel_template(Path(template_path))
+            ref_type = classify_excel_template(Path(ref_census_path))
+            swapped = True
+            print(f"    -> Post-Swap Types: Template={template_type}, Ref={ref_type}")
+
+        # 2. Volume-based check: The 'Reference' file should be the source of truth (more data).
+        if not swapped:
+            try:
+                import warnings
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    t_df = pd.read_excel(template_path, nrows=100)
+                    r_df = pd.read_excel(ref_census_path, nrows=100)
+                    
+                    # Count non-nulls in first 3 cols to ignore empty formatted templates
+                    t_val_count = t_df.iloc[:, :3].count().sum()
+                    r_val_count = r_df.iloc[:, :3].count().sum()
+                    
+                    print(f"    -> Content Check: Template={t_val_count} values, Ref={r_val_count} values")
+                    
+                    if t_val_count > (r_val_count + 10):
+                        print(f"    -> Volume-based Swap Triggered!")
+                        template_path, ref_census_path = ref_census_path, template_path
+                        template_type = classify_excel_template(Path(template_path))
+                        ref_type = classify_excel_template(Path(ref_census_path))
+                        swapped = True
+            except Exception as e:
+                print(f"    -> Volume check failed: {e}")
+
+        # 3. Format-based fallback
+        if not swapped and ref_type == "type3" and template_type != "type3":
+            print(f"    -> Format-based Swap: User put RAPT file in Reference slot. Swapping roles...")
             template_path, ref_census_path = ref_census_path, template_path
             template_type = "type3"
         elif ref_census_path:
-            template_type = "type3" # Force type3 if we have 3 files and no swap found
+            template_type = "type3" 
             
-        print(f"    -> Detected Template Type: {template_type.upper()} (3-file flow)")
+        print(f"    -> Final Decision: Template Type={template_type.upper()}")
     else:
         print(f"    -> Detected Template Type: {template_type.upper()}")
     
