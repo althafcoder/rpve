@@ -438,6 +438,25 @@ def run_validation(
     disc_col = col_positions.get('disc')
     data_start = (col_positions.get('header_row') or 1) + 1
 
+    # Fallback: if disc_col not found by header scan, search all cells for 'discrepan'
+    if disc_col is None:
+        for r in range(1, min(ws.max_row + 1, 50)):
+            for c in range(1, min(ws.max_column + 1, 60)):
+                val = str(ws.cell(row=r, column=c).value or '').strip().lower()
+                if 'discrepan' in val:
+                    disc_col = c
+                    col_positions['disc'] = c
+                    logger.info(f"Fallback: found Discrepancies column at col {c} (row {r})")
+                    break
+            if disc_col:
+                break
+
+    if disc_col is None:
+        logger.warning(
+            "Discrepancies column not found in the filled Excel — "
+            "Phase 3 will skip row-level validation but will still save the workbook."
+        )
+
     # ------------------------------------------------------------------
     # Scan all rows for discrepancy flags
     # ------------------------------------------------------------------
@@ -463,6 +482,12 @@ def run_validation(
         )
         if row_is_empty:
             break
+
+        # Skip discrepancy logic if column was not found
+        if disc_col is None:
+            stats['total_rows'] += 1
+            stats['still_unresolved'] += 1
+            continue
 
         disc_cell = ws.cell(row=row_idx, column=disc_col)
         disc_val  = str(disc_cell.value or '').strip()

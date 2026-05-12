@@ -33,7 +33,7 @@ const AppHeader = () => {
             <h1 className="text-2xl font-bold tracking-tight text-[hsl(var(--header-fg))] whitespace-nowrap">
               Data Retrieval Ingestion Verification Engine
             </h1>
-            <p className="text-sm text-[hsl(var(--header-fg))]/70">AI-Powered PDF Processing & Data Extraction</p>
+            <p className="text-sm text-[hsl(var(--header-fg))]/70">RPVE(Resource-Prestige-velocity-Engage)</p>
           </div>
         </div>
 

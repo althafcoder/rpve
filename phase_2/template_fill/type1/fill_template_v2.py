@@ -198,8 +198,19 @@ class DynamicCensusFiller:
             if self.discrepancy_column:
                 logger.info(f"Using Discrepancies column at index {self.discrepancy_column}.")
             else:
-                logger.warning("Discrepancies column not found. Validation status will be skipped.")
+                # Append a new Discrepancies column after the last used column
+                self.discrepancy_column = ws.max_column + 1
+                from openpyxl.styles import Font, PatternFill, Alignment
+                hdr_cell = ws.cell(row=start_row - 1, column=self.discrepancy_column)
+                hdr_cell.value = "Discrepancies"
+                hdr_cell.font = Font(name='Arial', bold=True, color='FFFFFF', size=10)
+                hdr_cell.fill = PatternFill('solid', start_color='4472C4')
+                hdr_cell.alignment = Alignment(horizontal='center', vertical='center')
+                letter = hdr_cell.column_letter
+                ws.column_dimensions[letter].width = 30
+                logger.info(f"Appended new Discrepancies column at index {self.discrepancy_column}.")
             logger.info(f"Using census coverage column at index {self.census_coverage_column}.")
+
 
             filled_count = 0
             validated_count = 0
@@ -294,11 +305,6 @@ def main():
     if filler.load_source(args.source):
         if not filler.fill_template(args.template, args.output):
             sys.exit(1)
-    else:
-        sys.exit(1)
-
-if __name__ == "__main__":
-    main()
     else:
         sys.exit(1)
 

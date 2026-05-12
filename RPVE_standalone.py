@@ -772,8 +772,11 @@ Names are often printed as "LastName, FirstName" or "LastName, FirstName Middle"
 🔹 Coverage Recovery  : Map coverage type codes using the following legend for ALL UHC documents:
     - `E` or "Employee Only" → **EE**
     - `ES` or "Employee and Spouse" → **ES**
+    - `ES` or "Employee + Spouse" → **ES**
     - `ESC` or "Employee and Family" → **FAM**
+    - `ESC` or "Employee + Family" → **FAM**
     - `EC` or "Employee and Child(ren)" → **EC**
+    - `EC` or "Employee + Child(ren)" → **EC**
     - `E1D` or "Employee and One Dependent" → **EC**
     - `E2D` or "Employee and Two Dependents" → **EC**
     - `E3D` or "Employee and Three Dependents" → **EC**
@@ -797,14 +800,13 @@ Names are often printed as "LastName, FirstName" or "LastName, FirstName Middle"
 
 PDF TEXT: {text}
 """
-
     lines = text.split('\n')
     chunks = []
     current_chunk = []
     current_len = 0
 
-    # Use 7,500 char chunk size to stay within GPT-4o output token limits (4k tokens).
-    # A 15,000-40,000 char chunk could contain ~150-350 rows, which exceeds output limits.
+    # Use 40,000 char chunks by default (suitable for many files).
+    # If a chunk fails, the recursive _process_chunk will split it dynamically.
     CHUNK_MAX = 40000
     OVERLAP   = 4000
 
@@ -823,10 +825,9 @@ PDF TEXT: {text}
     all_employees = []
     final_summary = {}
 
-    print(f"[RPVE] LLM extraction ({sub_type}) split into {len(chunks)} chunks...")
-    for i, chunk in enumerate(chunks):
-        # Use simple string replacement for the placeholder
-        prompt = prompt_template.replace("{text}", chunk)
+    def _call_llm_for_chunk(chunk_text: str) -> dict | None:
+        """Send one chunk to GPT-4o and return parsed dict, or None on failure."""
+        prompt = prompt_template.replace("{text}", chunk_text)
         try:
             response = client.chat.completions.create(
                 model="gpt-4o",
@@ -838,60 +839,85 @@ PDF TEXT: {text}
                 response_format={"type": "json_object"},
             )
             raw = response.choices[0].message.content
+
+            # Strategy 1: Direct parsing
             try:
-                # Try multiple JSON parsing strategies
-                data = None
-                
-                # Strategy 1: Direct parsing
-                try:
-                    data = json.loads(raw)
-                except json.JSONDecodeError:
-                    pass
-                
-                # Strategy 2: Remove markdown code blocks
-                if not data:
-                    try:
-                        cleaned = re.sub(r"```json|```", "", raw).strip()
-                        data = json.loads(cleaned)
-                    except json.JSONDecodeError:
-                        pass
-                
-                # Strategy 3: Extract JSON from text
-                if not data:
-                    try:
-                        # Look for JSON object pattern
-                        json_match = re.search(r'\{[\s\S]*\}', raw)
-                        if json_match:
-                            data = json.loads(json_match.group())
-                    except json.JSONDecodeError:
-                        pass
-                
-                # Strategy 4: Try to fix common JSON issues
-                if not data:
-                    try:
-                        # Fix unterminated strings and missing quotes
-                        fixed = re.sub(r'(?<!\\)"(?!\\)', '"', raw)  # Fix quote escaping
-                        fixed = re.sub(r'\n\s*"', '"', fixed)     # Remove newlines before quotes
-                        fixed = re.sub(r'"\s*\n', '"', fixed)     # Remove newlines after quotes
-                        data = json.loads(fixed)
-                    except json.JSONDecodeError:
-                        pass
-                
-                if data:
-                    if not final_summary and data.get("summary"):
-                        # Always grab summary from the first successful chunk
-                        final_summary = data.get("summary")
-                        
-                    emps = data.get("employees", [])
-                    all_employees.extend(emps)
-                    print(f"  [RPVE] Chunk {i+1}/{len(chunks)} processed -> found {len(emps)} records")
-                else:
-                    print(f"  [RPVE] Chunk {i+1}/{len(chunks)} failed: Could not parse JSON from response")
-                    
-            except Exception as parse_error:
-                print(f"  [RPVE] Chunk {i+1}/{len(chunks)} failed: {parse_error}")
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                pass
+
+            # Strategy 2: Remove markdown code blocks
+            try:
+                cleaned = re.sub(r"```json|```", "", raw).strip()
+                return json.loads(cleaned)
+            except json.JSONDecodeError:
+                pass
+
+            # Strategy 3: Extract JSON object from surrounding text
+            try:
+                json_match = re.search(r'\{[\s\S]*\}', raw)
+                if json_match:
+                    return json.loads(json_match.group())
+            except json.JSONDecodeError:
+                pass
+
+            return None  # All strategies failed
         except Exception as e:
-            print(f"  [RPVE] Chunk {i+1}/{len(chunks)} failed: {e}")
+            print(f"    [RPVE] LLM call error: {e}")
+            return None
+
+    def _process_chunk(chunk_text: str, label: str, depth: int = 0) -> tuple[list, dict]:
+        """
+        Process a single chunk. If parsing fails, automatically split in half
+        and retry each half independently (recursive).
+        Returns (employees_list, summary_dict).
+        """
+        # If chunk is too small, don't try LLM, just return empty
+        if not chunk_text.strip():
+            return [], {}
+
+        data = _call_llm_for_chunk(chunk_text)
+        if data is not None:
+            return data.get("employees", []), data.get("summary", {})
+
+        # If parsing failed and we haven't reached max depth/min size, split and retry
+        if len(chunk_text) > 4000 and depth < 3:
+            mid = len(chunk_text) // 2
+            # Find the nearest newline to the midpoint to avoid splitting mid-record
+            split_at = chunk_text.rfind('\n', 0, mid)
+            if split_at == -1 or split_at < mid * 0.5: # Fallback if no good newline
+                split_at = mid
+            
+            half_a = chunk_text[:split_at]
+            half_b = chunk_text[split_at:]
+
+            print(f"    [RPVE] {label} failed — retrying as sub-chunks (depth {depth+1})...")
+            emps_a, summ_a = _process_chunk(half_a, f"{label}a", depth + 1)
+            emps_b, summ_b = _process_chunk(half_b, f"{label}b", depth + 1)
+
+            return emps_a + emps_b, summ_a or summ_b
+        
+        print(f"    [RPVE] {label} failed permanently (length {len(chunk_text)}).")
+        return [], {}
+
+
+    print(f"[RPVE] LLM extraction ({sub_type}) split into {len(chunks)} chunks...")
+    for i, chunk in enumerate(chunks):
+        label = f"Chunk {i+1}/{len(chunks)}"
+        emps, summ = _process_chunk(chunk, label)
+        if emps is not None and len(emps) > 0:
+            if not final_summary and summ:
+                final_summary = summ
+            all_employees.extend(emps)
+            print(f"  [RPVE] {label} processed -> found {len(emps)} records")
+        elif emps is not None and len(emps) == 0:
+            # LLM returned valid JSON but no employees in this chunk (legitimate)
+            if not final_summary and summ:
+                final_summary = summ
+            print(f"  [RPVE] {label} processed -> 0 records (no employees in section)")
+        else:
+            print(f"  [RPVE] {label} failed: Could not parse JSON from response")
+
 
     result = {
         "summary": final_summary,
