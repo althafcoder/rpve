@@ -126,14 +126,33 @@ def _plan_type_to_coverage(plan_type) -> str:
         return ""
     t = re.sub(r'[\s+()\-]', '', str(plan_type).upper())
     MAP = {
+        # Single-letter codes (CDPHP / Omni / RAPT census)
+        'E':                 'EE',
+        'S':                 'ES',
+        'C':                 'EC',
+        'F':                 'FAM',
+        # Short codes
+        'EE':                'EE',
+        'ES':                'ES',
+        'EC':                'EC',
+        'EF':                'FAM',
+        'FAM':               'FAM',
+        'SP':                'ES',
+        'CH':                'EC',
+        # Long-form
         'EMPLOYEE':          'EE',
+        'EMPLOYEEONLY':      'EE',
         'EMPLOYEESPOUSE':    'ES',
+        'EMPLOYEEANDSPOUSE': 'ES',
         'EMPLOYEECHILDREN':  'EC',
         'EMPLOYEECHILDRN':   'EC',
-        'EMPLOYEECHILDREN':  'EC',
+        'EMPLOYEEANDCHILDREN': 'EC',
         'FAMILY':            'FAM',
+        'EMPLOYEEFAMILY':    'FAM',
     }
-    return MAP.get(t, 'EE')
+    # Return mapped value; if not in map, return the original value as-is
+    # (do NOT default to EE — that hides real data)
+    return MAP.get(t, str(plan_type).strip())
 
 
 def _gender_code(gender) -> str:
@@ -224,32 +243,55 @@ def load_invoice(path: str) -> dict:
 # For each logical field, any column whose header contains ANY of these
 # keywords (case-insensitive) will be mapped to that field.
 _CENSUS_COL_RULES = {
+    # ── Ordered from MOST specific to LEAST specific ──────────────────────────
+    # Each entry is (logical_field, list_of_keywords_in_priority_order).
+    # The FIRST column whose header CONTAINS any keyword wins.
+
     'insured':   ['insured name', 'insured'],                   # grouping key (TEPCensus)
-    'emp_dep':   ['employee or dependent', 'emp or dep',        # row-type flag
-                  'employee (1)', 'dependent (0)',               # "*Employee (1) or Dependent (0)" format
-                  'relationship type', 'member type'],
-    'first':     ['first name', 'first', 'given name',
-                  'employee name', 'employee  name'],           # first / given
+
+    'emp_dep':   ['employee or dependent', 'emp or dep',        # explicit employee/dep marker
+                  'employee (1)', 'dependent (0)',
+                  'relationship type', 'member type',
+                  'relationship'],                               # CDPHP: 'Relationship' col
+
+    # Coverage/tier — MOST SPECIFIC keywords first so 'Medical Plan Coverage'
+    # wins before the generic 'coverage' substring catches 'Relationship'.
+    'coverage':  ['medical plan coverage',                      # CDPHP Employee Census
+                  'coverage level', 'coverage tier',
+                  'coverage type', 'benefit tier',
+                  'plan coverage',                              # generic "plan coverage"
+                  'coverage'],                                  # last resort — generic
+    # NOTE: 'relationship' and 'plan type' deliberately removed from coverage
+    # to avoid ambiguity with the Relationship and Medical Plan columns.
+
+    'first':     ['first name', 'first', 'given name'],        # first name ONLY
     'last':      ['last name', 'last', 'surname', 'family name'],
-    'fullname':  ['full name', 'name', 'member name',          # combined first+last
-                  'employee name'],
-    'coverage':  ['coverage level', 'coverage tier',
-                  'coverage type', 'coverage', 'tier',
-                  'plan type', 'relationship'],
+    'fullname':  ['full name', 'full_name', 'member name',
+                  'employee name', 'name'],                    # combined first+last
+
     'gender':    ['gender', 'sex'],
     'dob':       ['date of birth', 'dob', 'birth date',
                   'birth', 'birthdate'],
     'zip':       ['zip code', 'zip', 'postal code', 'home zip'],
-    'dep_rel':   ['dependent relation', 'relation', 'dep relation'],
-    'plan_desc': ['plan description', 'plan name', 'plan'],
+    'dep_rel':   ['dependent relation', 'dep relation'],        # 'relation' removed; covered by emp_dep
+    'plan_desc': ['medical plan', 'plan description', 'plan name', 'plan'],
 }
 
-# Employee-type values in coverage/type column
-_EMP_MARKERS = {'e', 'ee', 'f', 'c', 'ec', 'es', 'ef', 'fam', 'employee',
-                'subscriber', 'primary', 'insured', 'member'}
+# Employee-type values — used when coverage column holds LONG-FORM text like
+# 'Employee Only' / 'Employee + Spouse', OR when the Relationship column
+# (emp_dep) holds 'Employee'.
+_EMP_MARKERS = {
+    # Single-letter codes (Omni / RAPT census)
+    'e', 'ee', 's', 'c', 'f', 'ec', 'es', 'ef', 'fam',
+    # Long-form relationship values (CDPHP Employee Census 'Relationship' column)
+    'employee',
+    # Generic
+    'subscriber', 'primary', 'insured', 'member',
+}
 # Dependent relation keywords
 _DEP_KEYWORDS = ('spouse', 'child', 'dependent', 'son', 'daughter',
                  'partner', 'domestic')
+
 
 
 def _detect_census_columns(df: pd.DataFrame) -> dict:

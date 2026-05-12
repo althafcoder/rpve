@@ -89,7 +89,9 @@ def canonical_coverage_tier(value: Any) -> str:
         # Short codes
         "E":                         "EE",
         "EE":                        "EE",
-        "S":                         "EE",
+        "S":                         "ES",   # S = Employee+Spouse
+        "C":                         "EC",   # C = Employee+Children
+        "F":                         "FAM",  # F = Family
         "EMPLOYEE":                  "EE",
         "EMPLOYER":                  "EE",
         "EMPLOYEEONLY":              "EE",
