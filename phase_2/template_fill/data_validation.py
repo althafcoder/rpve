@@ -505,9 +505,18 @@ def run_validation(
         # ── Already resolved rows — skip ──────────────────────────────
         if not (is_not_census or is_not_invoice):
             stats['already_correct'] += 1
+            
+            # Identify the invoice that Phase 2 mapped to this row and claim it
+            match_entry, _, _ = match_name(raw_name, invoice_lookup, threshold)
+            if match_entry:
+                claimed_invoices.add(match_entry['raw_name'])
+                
             if 'matched' in disc_val.lower():
-                # If we run on an already validated file, track previously claimed matches
-                pass
+                # Fallback: track previously claimed matches if re-running
+                if " -> " in disc_val:
+                    inv_name = disc_val.split(" -> ", 1)[-1].strip()
+                    claimed_invoices.add(inv_name)
+                    
             continue
 
         # Run name matching
