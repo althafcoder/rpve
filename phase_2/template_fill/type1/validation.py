@@ -77,13 +77,14 @@ def discrepancy_status(
     invoice_name: Any,
     extracted_coverage_tier: Any,
     invoice_coverage_tier: Any,
+    name_is_matched: bool = False
 ) -> str:
     """
     Return validation status for Discrepancies column.
     - Correct: employee name and coverage tier both match
     - Specific mismatch messages otherwise
     """
-    n_match = names_match(extracted_name, invoice_name)
+    n_match = name_is_matched or names_match(extracted_name, invoice_name)
     c_match = coverage_match(extracted_coverage_tier, invoice_coverage_tier)
 
     if n_match and c_match:

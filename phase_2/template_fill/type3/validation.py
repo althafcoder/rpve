@@ -92,6 +92,10 @@ def canonical_coverage_tier(value: Any) -> str:
         "S":                         "ES",   # S = Employee+Spouse
         "C":                         "EC",   # C = Employee+Children
         "F":                         "FAM",  # F = Family
+        "W":                         "WO",   # W = Waiver
+        "NC":                        "RC",   # NC = No Coverage -> Refusing Coverage
+        "NE":                        "NE",   # NE = Not Eligible
+        "C":                         "C",    # C = COBRA
         "EMPLOYEE":                  "EE",
         "EMPLOYER":                  "EE",
         "EMPLOYEEONLY":              "EE",
@@ -155,6 +159,7 @@ def discrepancy_status(
     invoice_name: Any,
     extracted_coverage_tier: Any,
     invoice_coverage_tier: Any,
+    name_is_matched: bool = False
 ) -> str:
     """
     Return validation status for Discrepancies column.
@@ -163,7 +168,7 @@ def discrepancy_status(
       mismatch coverage name                     – coverage differs
       mismatch employee name & mismatch coverage name
     """
-    n_match = names_match(extracted_name, invoice_name)
+    n_match = name_is_matched or names_match(extracted_name, invoice_name)
     c_match = coverage_match(extracted_coverage_tier, invoice_coverage_tier)
 
     if n_match and c_match:

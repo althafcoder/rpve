@@ -301,10 +301,10 @@ def _find_columns(ws) -> dict[str, int | None]:
                 current_cols['first'] = c; score += 2
             elif 'last' in v and 'name' in v:
                 current_cols['last'] = c; score += 2
-            elif 'plan' in v:
-                current_cols['plan'] = c; score += 1
             elif 'premium' in v:
                 current_cols['premium'] = c; score += 1
+            elif 'plan' in v:
+                current_cols['plan'] = c; score += 1
             elif 'discrep' in v:
                 current_cols['disc'] = c; score += 3 # High weight for validation column
         
@@ -527,7 +527,7 @@ def run_validation(
 
         if is_not_invoice:
             # ── Original Census Row needing invoice data ──────────────────
-            if match_type == 'canonical':
+            if match_type in ('canonical', 'token_swap'):
                 _apply_match(ws, row_idx, match_entry, col_positions,
                              f"Matched -> {match_entry['raw_name']}"[:40],
                              _FILL_GREEN)
@@ -591,8 +591,22 @@ def run_validation(
     # Save audit log JSON
     # ------------------------------------------------------------------
     audit_path = output_path.with_suffix('.audit.json')
+    
+    # Calculate unclaimed invoices
+    unique_invoices = {entry['raw_name']: entry for entry in invoice_lookup.values()}
+    unclaimed_invoices = [
+        # Remove the 'tokens' set since it is not JSON serializable natively
+        {k: v for k, v in entry.items() if k != 'tokens'} 
+        for name, entry in unique_invoices.items() 
+        if name not in claimed_invoices
+    ]
+    
     with open(str(audit_path), 'w', encoding='utf-8') as f:
-        json.dump({'stats': stats, 'entries': audit_log}, f, indent=2, default=str)
+        json.dump({
+            'stats': stats, 
+            'entries': audit_log,
+            'unclaimed_invoices': unclaimed_invoices
+        }, f, indent=2, default=str)
     logger.info(f"Audit log saved -> {audit_path}")
 
     # Summary
@@ -640,10 +654,13 @@ def _apply_match(ws, row_idx: int, entry: dict, cols: dict,
             plan_cell.font      = _FONT
             plan_cell.alignment = _LEFT
 
-    # Fill premium if cell is empty
+    # Fill premium if cell is empty or has placeholder value
     if prem_col and entry.get('premium') is not None:
         prem_cell = ws.cell(row=row_idx, column=prem_col)
-        if not prem_cell.value:
+        # Check if empty or contains #N/A or 0 placeholder
+        val = prem_cell.value
+        is_empty = val is None or str(val).strip() == '' or str(val).strip().upper() in ('#N/A', 'N/A', 'NA', '0', '0.0', '0.00')
+        if is_empty:
             prem_cell.value         = entry['premium']
             prem_cell.font          = _FONT
             prem_cell.alignment     = _CENTER

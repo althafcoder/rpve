@@ -25,6 +25,7 @@ from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
 from validation import discrepancy_status, NOT_ON_CENSUS_STATUS
+import census_normalizer
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -121,51 +122,9 @@ def _is_valid_name(name) -> bool:
 # ---------------------------------------------------------------------------
 # Other helpers
 # ---------------------------------------------------------------------------
-def _plan_type_to_coverage(plan_type) -> str:
-    if not plan_type or (isinstance(plan_type, float) and pd.isna(plan_type)):
-        return ""
-    t = re.sub(r'[\s+()\-]', '', str(plan_type).upper())
-    MAP = {
-        # Single-letter codes (CDPHP / Omni / RAPT census)
-        'E':                 'EE',
-        'S':                 'ES',
-        'C':                 'EC',
-        'F':                 'FAM',
-        # Short codes
-        'EE':                'EE',
-        'ES':                'ES',
-        'EC':                'EC',
-        'EF':                'FAM',
-        'FAM':               'FAM',
-        'SP':                'ES',
-        'CH':                'EC',
-        # Long-form
-        'EMPLOYEE':          'EE',
-        'EMPLOYEEONLY':      'EE',
-        'EMPLOYEESPOUSE':    'ES',
-        'EMPLOYEEANDSPOUSE': 'ES',
-        'EMPLOYEECHILDREN':  'EC',
-        'EMPLOYEECHILDRN':   'EC',
-        'EMPLOYEEANDCHILDREN': 'EC',
-        'FAMILY':            'FAM',
-        'EMPLOYEEFAMILY':    'FAM',
-    }
-    # Return mapped value; if not in map, return the original value as-is
-    # (do NOT default to EE — that hides real data)
-    return MAP.get(t, str(plan_type).strip())
-
-
-def _gender_code(gender) -> str:
-    if not gender or (isinstance(gender, float) and pd.isna(gender)):
-        return ""
-    g = str(gender).strip().upper()
-    return 'M' if g.startswith('M') else ('F' if g.startswith('F') else '')
-
-
-def _relationship_code(emp_or_dep: str, relation) -> str:
-    if str(emp_or_dep).lower() == 'employee':
-        return 'EE'
-    return 'SP' if 'spouse' in str(relation or '').lower() else 'CH'
+def _make_key(name) -> str:
+    """Canonical lookup key: always stored as 'firstname lastname' order."""
+    return " ".join(_tokens(name))
 
 
 # ---------------------------------------------------------------------------
@@ -236,320 +195,24 @@ def load_invoice(path: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Step 2: Universal reference census loader (any format)
+# Step 2: Universal reference census loader (delegates to normalizer)
 # ---------------------------------------------------------------------------
-
-# ── Column keyword rules ────────────────────────────────────────────────────
-# For each logical field, any column whose header contains ANY of these
-# keywords (case-insensitive) will be mapped to that field.
-_CENSUS_COL_RULES = {
-    # ── Ordered from MOST specific to LEAST specific ──────────────────────────
-    # Each entry is (logical_field, list_of_keywords_in_priority_order).
-    # The FIRST column whose header CONTAINS any keyword wins.
-
-    'insured':   ['insured name', 'insured'],                   # grouping key (TEPCensus)
-
-    'emp_dep':   ['employee or dependent', 'emp or dep',        # explicit employee/dep marker
-                  'employee (1)', 'dependent (0)',
-                  'relationship type', 'member type',
-                  'relationship'],                               # CDPHP: 'Relationship' col
-
-    # Coverage/tier — MOST SPECIFIC keywords first so 'Medical Plan Coverage'
-    # wins before the generic 'coverage' substring catches 'Relationship'.
-    'coverage':  ['medical plan coverage',                      # CDPHP Employee Census
-                  'coverage level', 'coverage tier',
-                  'coverage type', 'benefit tier',
-                  'plan coverage',                              # generic "plan coverage"
-                  'coverage'],                                  # last resort — generic
-    # NOTE: 'relationship' and 'plan type' deliberately removed from coverage
-    # to avoid ambiguity with the Relationship and Medical Plan columns.
-
-    'first':     ['first name', 'first', 'given name'],        # first name ONLY
-    'last':      ['last name', 'last', 'surname', 'family name'],
-    'fullname':  ['full name', 'full_name', 'member name',
-                  'employee name', 'name'],                    # combined first+last
-
-    'gender':    ['gender', 'sex'],
-    'dob':       ['date of birth', 'dob', 'birth date',
-                  'birth', 'birthdate'],
-    'zip':       ['zip code', 'zip', 'postal code', 'home zip'],
-    'dep_rel':   ['dependent relation', 'dep relation'],        # 'relation' removed; covered by emp_dep
-    'plan_desc': ['medical plan', 'plan description', 'plan name', 'plan'],
-}
-
-# Employee-type values — used when coverage column holds LONG-FORM text like
-# 'Employee Only' / 'Employee + Spouse', OR when the Relationship column
-# (emp_dep) holds 'Employee'.
-_EMP_MARKERS = {
-    # Single-letter codes (Omni / RAPT census)
-    'e', 'ee', 's', 'c', 'f', 'ec', 'es', 'ef', 'fam',
-    # Long-form relationship values (CDPHP Employee Census 'Relationship' column)
-    'employee',
-    # Generic
-    'subscriber', 'primary', 'insured', 'member',
-}
-# Dependent relation keywords
-_DEP_KEYWORDS = ('spouse', 'child', 'dependent', 'son', 'daughter',
-                 'partner', 'domestic')
-
-
-
-def _detect_census_columns(df: pd.DataFrame) -> dict:
-    """
-    Returns a mapping {logical_field: actual_column_name} by scanning
-    column headers with keyword rules. First match wins per field.
-    """
-    col_map = {}
-    for col in df.columns:
-        cl = col.lower().strip()
-        for field, keywords in _CENSUS_COL_RULES.items():
-            if field in col_map:
-                continue  # already mapped
-            for kw in keywords:
-                if kw in cl:
-                    col_map[field] = col
-                    break
-    return col_map
-
-
-def _get_val(row, col_map: dict, field: str, default='') -> str:
-    """Safely get a string value from a row using the col_map."""
-    col = col_map.get(field)
-    if not col:
-        return default
-    v = row.get(col, default)
-    if v is None or (isinstance(v, float) and pd.isna(v)):
-        return default
-    return str(v).strip()
-
-
 def load_ref_census(path: str) -> dict:
     """
-    Universal census loader — works with ANY column naming convention.
-
-    Strategy:
-      1. Find the right sheet
-      2. Find the header row (first row that mentions a name-related keyword)
-      3. Map columns by keyword detection
-      4. Detect layout type:
-         A) GROUPED  – has an 'insured' column that groups members together
-                       (e.g. TEPCensus: Insured Name + Employee or Dependent)
-         B) ROW-PER-PERSON – each row = one person, employee vs dependent
-                       identified by coverage code or relation keyword
-                       (e.g. Omni: Coverage Level = E/F/C or 'Spouse'/'Child')
-         C) EMPLOYEE-ONLY – no dependency structure, every row = one employee
+    Universal census loader — delegates to census_normalizer.
     Returns dict keyed by canonical 'firstname lastname' lookup key.
     """
-    xl = pd.ExcelFile(path)
-
-    # Pick the best sheet
-    sheet = next(
-        (s for s in xl.sheet_names
-         if any(k in s.lower() for k in ('census', 'employee', 'member', 'data',
-                                          'enrollment', 'roster'))),
-        xl.sheet_names[0]
-    )
-
-    # Find header row (first row containing a name / employee keyword)
-    probe = pd.read_excel(path, sheet_name=sheet, header=None, nrows=20)
-    hrow = 0
-    for i, row in probe.iterrows():
-        row_str = ' '.join(str(v).lower() for v in row if pd.notna(v))
-        if any(kw in row_str for kw in ('first', 'last', 'insured', 'name',
-                                         'employee', 'member', 'subscriber')):
-            hrow = i
-            break
-
-    df = pd.read_excel(path, sheet_name=sheet, header=hrow)
-    df.columns = [str(c).strip() for c in df.columns]
-
-    col_map = _detect_census_columns(df)
-    logger.info(f"Census column map: {col_map}")
-
-    # ── Layout detection ────────────────────────────────────────────────────
-    if 'insured' in col_map and 'emp_dep' in col_map:
-        result = _parse_grouped(df, col_map)
-        fmt = 'grouped (TEPCensus-style)'
-    elif 'first' in col_map or 'fullname' in col_map:
-        result = _parse_row_per_person(df, col_map)
-        fmt = 'row-per-person (Omni-style)'
-    else:
-        logger.warning("Census: no recognisable name column found — returning empty.")
-        return {}
-
-    logger.info(f"Ref census loaded ({fmt}): {len(result)} unique employees")
-    return result
-
-
-def _parse_grouped(df: pd.DataFrame, col_map: dict) -> dict:
-    """
-    Grouped layout: rows share an 'Insured Name' grouping key.
-    Employee row identified by emp_dep column == 'employee'.
-    """
-    groups = defaultdict(list)
-    for _, row in df.iterrows():
-        insured = _get_val(row, col_map, 'insured')
-        if insured:
-            groups[insured].append(row)
-
+    normalized_data = census_normalizer.normalize_census_to_list(path)
+    
+    # Convert list of objects to the dictionary format expected by the filler
     result = {}
-    for insured, rows in groups.items():
-        emp_dep_col = col_map.get('emp_dep', '')
-        emp_rows = [r for r in rows
-                    if str(r.get(emp_dep_col, '') or '').lower() == 'employee']
-        if not emp_rows:
-            emp_rows = rows[:1]  # fallback: treat first row as employee
-
-        emp      = emp_rows[0]
-        first    = _get_val(emp, col_map, 'first')
-        last     = _get_val(emp, col_map, 'last')
-        gender   = _gender_code(_get_val(emp, col_map, 'gender'))
-        dob      = emp.get(col_map['dob']) if 'dob' in col_map else None
-        zip_code = _get_val(emp, col_map, 'zip')
-
-        # Coverage from plan rows
-        plan_desc_col = col_map.get('plan_desc', '')
-        health_rows   = [r for r in emp_rows
-                         if 'BCBS' in str(r.get(plan_desc_col, '') or '').upper()]
-        if health_rows:
-            coverage = _plan_type_to_coverage(
-                _get_val(health_rows[0], col_map, 'coverage'))
-        else:
-            raw_cov  = _get_val(emp, col_map, 'coverage')
-            coverage = _plan_type_to_coverage(raw_cov) if raw_cov else 'EE'
-
-        # Dependents
-        dep_rows   = [r for r in rows if r is not emp and
-                      str(r.get(emp_dep_col, '') or '').lower() != 'employee']
-        dependents = _extract_dependents(dep_rows, col_map, zip_code)
-
-        canon_key = _make_key(f"{first} {last}")
-        if canon_key and canon_key not in result:
-            result[canon_key] = {
-                'first': first, 'last': last, 'gender': gender,
-                'dob': dob, 'zip': zip_code, 'coverage': coverage,
-                'dependents': dependents,
-            }
+    for _, data in normalized_data.items():
+        # Ensure the key is the canonical version used by tokens
+        canon_key = _make_key(data.get('first', '') + ' ' + data.get('last', ''))
+        result[canon_key] = data
+        
+    logger.info(f"Ref census loaded via normalizer: {len(result)} employees")
     return result
-
-
-def _parse_row_per_person(df: pd.DataFrame, col_map: dict) -> dict:
-    """
-    Row-per-person layout: each row is one person.
-    Employees identified by:
-      1. emp_dep column (if available) — e.g. 'Employee' / 'Spouse' / 'Child'
-      2. Fallback: coverage code or absence of relation keyword
-    Dependents follow the preceding employee row.
-    """
-    result      = {}
-    current_emp = None
-    has_emp_dep = 'emp_dep' in col_map   # explicit Employee/Dependent marker column
-
-    for _, row in df.iterrows():
-        # Get name — prefer first+last split, fall back to fullname
-        first = _get_val(row, col_map, 'first')
-        last  = _get_val(row, col_map, 'last')
-
-        if not first and not last:
-            fullname = _get_val(row, col_map, 'fullname')
-            if not fullname or fullname.lower() == 'nan':
-                continue
-            parts = fullname.split()
-            first = parts[0] if parts else ''
-            last  = ' '.join(parts[1:]) if len(parts) > 1 else ''
-
-        if not first and not last:
-            continue
-
-        cov_raw   = _get_val(row, col_map, 'coverage')
-        cov_lower = cov_raw.lower()
-        cov_clean = re.sub(r'[^a-z]', '', cov_lower)
-
-        gender   = _gender_code(_get_val(row, col_map, 'gender'))
-        dob      = row.get(col_map['dob']) if 'dob' in col_map else None
-        zip_code = _get_val(row, col_map, 'zip')
-
-        # ── Employee / Dependent classification ──────────────────────
-        if has_emp_dep:
-            # PRIMARY: use explicit marker column (most reliable)
-            emp_dep_val = _get_val(row, col_map, 'emp_dep').lower().strip()
-            is_employee  = emp_dep_val in ('employee', '1', 'ee', 'subscriber',
-                                           'primary', 'insured', 'member')
-            is_dependent = emp_dep_val in ('spouse', 'child', 'dependent', '0',
-                                           'sp', 'ch', 'son', 'daughter',
-                                           'partner', 'domestic partner')
-            # Derive relation from emp_dep value directly
-            dep_relation = ('SP' if any(kw in emp_dep_val
-                            for kw in ('spouse', 'partner')) else 'CH')
-        else:
-            # FALLBACK: infer from coverage codes
-            is_employee  = (
-                cov_clean in _EMP_MARKERS
-                or (not cov_raw and current_emp is None)
-            )
-            is_dependent = (
-                any(kw in cov_lower for kw in _DEP_KEYWORDS)
-                or (_get_val(row, col_map, 'dep_rel') != '' and not is_employee)
-                or (not cov_raw and current_emp is not None)
-            )
-            dep_relation = None   # will be derived below
-
-        is_wc_only = cov_clean in ('wc', 'workcomp', 'workerscomp')
-
-        if is_wc_only:
-            current_emp = None
-            continue
-
-        if is_employee and not is_dependent:
-            coverage = _plan_type_to_coverage(cov_raw) if cov_raw else 'EE'
-            current_emp = {
-                'first': first, 'last': last, 'gender': gender,
-                'dob': dob, 'zip': zip_code, 'coverage': coverage,
-                'dependents': [],
-            }
-            canon_key = _make_key(f"{first} {last}")
-            if canon_key and canon_key not in result:
-                result[canon_key] = current_emp
-
-        elif is_dependent and current_emp is not None:
-            dep_last = last or current_emp['last']
-            if dep_relation is None:
-                # Fallback relation derivation from dep_rel or coverage
-                rel_val  = _get_val(row, col_map, 'dep_rel') or cov_raw
-                dep_relation = ('SP' if any(kw in rel_val.lower()
-                                for kw in ('spouse', 'partner')) else 'CH')
-            if not any(d['first'] == first and d['last'] == dep_last
-                       for d in current_emp['dependents']):
-                current_emp['dependents'].append({
-                    'first': first, 'last': dep_last,
-                    'gender': gender, 'dob': dob,
-                    'zip': current_emp['zip'], 'relation': dep_relation,
-                })
-
-    return result
-
-
-def _extract_dependents(dep_rows, col_map: dict, emp_zip: str) -> list:
-    """Build dependent list from a set of rows (grouped-layout helper)."""
-    dependents, seen = [], set()
-    for dr in dep_rows:
-        d_first  = _get_val(dr, col_map, 'first')
-        d_last   = _get_val(dr, col_map, 'last')
-        dep_key  = f"{d_first}|{d_last}"
-        if dep_key in seen or (not d_first and not d_last):
-            continue
-        seen.add(dep_key)
-        rel_val  = _get_val(dr, col_map, 'dep_rel') or _get_val(dr, col_map, 'coverage')
-        rel      = 'SP' if any(kw in rel_val.lower()
-                                for kw in ('spouse', 'partner')) else 'CH'
-        dependents.append({
-            'first':    d_first, 'last':    d_last,
-            'gender':   _gender_code(_get_val(dr, col_map, 'gender')),
-            'dob':      dr.get(col_map['dob']) if 'dob' in col_map else None,
-            'zip':      emp_zip,
-            'relation': rel,
-        })
-    return dependents
 
 
 # ---------------------------------------------------------------------------
@@ -661,6 +324,7 @@ def write_employee_row(ws, row_idx, data_row_num, emp, inv, cols):
             invoice_name            = inv['raw_name'],
             extracted_coverage_tier = emp['coverage'],
             invoice_coverage_tier   = inv['coverage'],
+            name_is_matched         = True,
         )
         _wcell(ws, row_idx, cols.get('disc'), status, _CENTER,
                fill=_FILL_CORRECT if status == 'Correct' else _FILL_MISMATCH)
@@ -688,6 +352,12 @@ def write_dependent_row(ws, row_idx, data_row_num, dep, emp_row_num, cols):
 def fill_rapt_template(invoice_path, ref_census_path, template_path, output_path):
     invoice_lookup = load_invoice(invoice_path)
     ref_lookup     = load_ref_census(ref_census_path)
+    
+    # Save standardized census for reference
+    import os
+    out_dir = os.path.dirname(output_path)
+    std_census_path = os.path.join(out_dir, "STANDARDIZED_COMMON_CENSUS.xlsx")
+    _save_standardized_census(ref_lookup, std_census_path)
 
     wb = load_workbook(template_path)
     ws = next(
@@ -775,6 +445,44 @@ def fill_rapt_template(invoice_path, ref_census_path, template_path, output_path
         f"Matched={matched} | Not on invoice={not_on_invoice} | "
         f"Invoice-only (appended)={not_on_ref}"
     )
+
+
+def _save_standardized_census(ref_lookup, output_path):
+    """Saves the normalized census data to a flat Excel file for reference."""
+    rows = []
+    for canon_key, emp in ref_lookup.items():
+        # Employee Row
+        rows.append({
+            'Employee/Dependent': 'Employee',
+            'First Name': emp.get('first', ''),
+            'Last Name': emp.get('last', ''),
+            'Gender': emp.get('gender', ''),
+            'DOB': emp.get('dob', ''),
+            'Zip Code': emp.get('zip', ''),
+            'Coverage Tier': emp.get('coverage', ''),
+            'Relation': 'EE',
+            'Dependent Of': ''
+        })
+        # Dependent Rows
+        for dep in emp.get('dependents', []):
+            rows.append({
+                'Employee/Dependent': 'Dependent',
+                'First Name': dep.get('first', ''),
+                'Last Name': dep.get('last', ''),
+                'Gender': dep.get('gender', ''),
+                'DOB': dep.get('dob', ''),
+                'Zip Code': dep.get('zip', ''),
+                'Coverage Tier': '',
+                'Relation': dep.get('relation', ''),
+                'Dependent Of': f"{emp['first']} {emp['last']}"
+            })
+    
+    df = pd.DataFrame(rows)
+    try:
+        df.to_excel(output_path, index=False)
+        logger.info(f"Saved standardized common census to '{output_path}'")
+    except Exception as e:
+        logger.error(f"Failed to save standardized census: {e}")
 
 
 # ---------------------------------------------------------------------------

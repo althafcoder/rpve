@@ -55,10 +55,10 @@ def classify_excel_template(excel_path: Path) -> str:
             return "type1"
             
         # Type 3 Detection (RAPT Blue Headers)
-        elif "data row" in all_text or "cobra participant" in all_text:
+        elif "data row" in all_text or "cobra participant" in all_text or "discrepancies" in all_text:
             return "type3"
             
-        # Type 2 Detection (Basic Titan Intake / Generic Census)
+        # Type 2 (Basic Titan Intake / Generic Census)
         # Type 2 (`fill_template.py`) is designed as a fully dynamic universal filler.
         elif "first name" in all_text or "last name" in all_text or "name" in all_text:
             return "type2"
@@ -119,7 +119,8 @@ async def run_flow(pdf_path: str, template_path: str, ref_census_path: str = Non
 
         swapped = False
         # 1. Name-based hint: If the Reference slot contains "RAPT" and Template doesn't, swap.
-        if ("rapt" in r_name and "rapt" not in t_name) or ("template" in r_name and "template" not in t_name):
+        # BUT: Do not swap if the template already looks like a valid specific template (Type 1 or 3).
+        if template_type not in ["type1", "type3"] and (("rapt" in r_name and "rapt" not in t_name) or ("template" in r_name and "template" not in t_name)):
             print(f"    -> Name-based Swap: User put RAPT/Template file in Reference slot. Swapping roles...")
             template_path, ref_census_path = ref_census_path, template_path
             # Re-classify after swap
@@ -232,7 +233,43 @@ async def run_flow(pdf_path: str, template_path: str, ref_census_path: str = Non
             validated_report_path = phase2_report_path
             validated_report_name = phase2_report_name
 
-    # ── Register all 3 outputs in backend download cache ─────────────────────
+    # ── PHASE 4: LLM Resolution (Fallback) ──────────────────────────────────
+    print(f"\n[5] Executing Phase 4 (LLM Resolution)...")
+    llm_script = phase2_base / "llm_resolution.py"
+    audit_json_path = validated_report_path.with_suffix('.audit.json')
+    llm_report_path = validated_report_path.with_name(validated_report_path.name.replace("VALIDATED_", "LLM_RESOLVED_"))
+    llm_report_name = llm_report_path.name
+
+    if not llm_script.exists() or not audit_json_path.exists():
+        print(f"    [WARN] LLM resolution requirements not met. Skipping Phase 4.")
+        final_report_path = validated_report_path
+        final_report_name = validated_report_name
+    else:
+        llm_cmd = [
+            sys.executable, str(llm_script),
+            str(validated_report_path),
+            str(audit_json_path),
+            "--output", str(llm_report_path)
+        ]
+        print(f"    Running command: {' '.join(llm_cmd)}")
+        llm_result = subprocess.run(llm_cmd, capture_output=True, text=True)
+        
+        if llm_result.returncode == 0 and llm_report_path.exists():
+            print("    -> Phase 4 (LLM Resolution) Success!")
+            if llm_result.stdout:
+                print(llm_result.stdout)
+            if llm_result.stderr:
+                print(llm_result.stderr)
+            final_report_path = llm_report_path
+            final_report_name = llm_report_name
+        else:
+            print(f"    [WARN] Phase 4 failed or skipped. Using Phase 3 output as final.")
+            if llm_result.stderr:
+                print(llm_result.stderr)
+            final_report_path = validated_report_path
+            final_report_name = validated_report_name
+
+    # ── Register all outputs in backend download cache ───────────────────────
     if 'RPVE_standalone' in sys.modules:
         _standalone = sys.modules['RPVE_standalone']
         if hasattr(_standalone, '_cache'):
@@ -241,31 +278,36 @@ async def run_flow(pdf_path: str, template_path: str, ref_census_path: str = Non
                 _standalone._cache[phase2_report_name] = str(phase2_report_path.absolute())
             if validated_report_path.exists():
                 _standalone._cache[validated_report_name] = str(validated_report_path.absolute())
+            if final_report_path.exists() and final_report_path != validated_report_path:
+                _standalone._cache[final_report_name] = str(final_report_path.absolute())
 
-    # ── Build merged result — Phase 3 is the primary download ────────────────
+    # ── Build merged result — Phase 4/3 is the primary download ────────────────
     merged_result = result_data.copy()
 
-    # Primary frontend output = Phase 3 validated Excel
-    final_path = validated_report_path if validated_report_path.exists() else phase2_report_path
-    final_name = validated_report_name if validated_report_path.exists() else phase2_report_name
+    # Primary frontend output = Phase 4 (or Phase 3) Excel
+    merged_result["output_file"]       = final_report_name
+    merged_result["excel_file"]        = final_report_name
+    merged_result["excel_url"]         = f"/api/download/{final_report_name}"
+    merged_result["final_report_path"] = str(final_report_path.absolute())
 
-    merged_result["output_file"]       = final_name
-    merged_result["excel_file"]        = final_name
-    merged_result["excel_url"]         = f"/api/download/{final_name}"
-    merged_result["final_report_path"] = str(final_path.absolute())
-
-    # All 3 Excels exposed individually for the UI
+    # All Excels exposed individually for the UI
     merged_result["phase1_invoice_excel"]         = Path(phase1_output_excel).name
     merged_result["phase1_invoice_excel_url"]     = f"/api/download/{Path(phase1_output_excel).name}"
     merged_result["phase2_filled_census"]         = phase2_report_name
     merged_result["phase2_filled_census_url"]     = f"/api/download/{phase2_report_name}"
     merged_result["phase3_validated_census"]      = validated_report_name
     merged_result["phase3_validated_census_url"]  = f"/api/download/{validated_report_name}"
+    
+    if final_report_path != validated_report_path:
+        merged_result["phase4_llm_census"]      = final_report_name
+        merged_result["phase4_llm_census_url"]  = f"/api/download/{final_report_name}"
 
     print("\n--- Flow Completed Successfully! ---")
     print(f"  Excel 1 — Invoice Extraction : {Path(phase1_output_excel).name}")
     print(f"  Excel 2 — Filled Census      : {phase2_report_name}")
     print(f"  Excel 3 — Validated Census   : {validated_report_name}")
+    if final_report_path != validated_report_path:
+        print(f"  Excel 4 — LLM Resolved       : {final_report_name}")
     return merged_result
 
 

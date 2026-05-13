@@ -28,24 +28,34 @@ class DynamicCensusFiller:
         """Intelligent name normalization for robust matching."""
         if not name or pd.isna(name): return ""
         
-        name = str(name).lower().strip()
+        s = str(name).lower().strip()
         
         # Handle "Last, First" format
-        if ',' in name:
-            parts = [p.strip() for p in name.split(',')]
+        if ',' in s:
+            parts = [p.strip() for p in s.split(',')]
             if len(parts) >= 2:
-                # Reorder to "First Last"
-                name = f"{parts[1]} {parts[0]}"
+                s = f"{parts[1]} {parts[0]}"
+                
+        # Remove punctuation
+        s = re.sub(r"[^a-z\s]", " ", s)
+        s = re.sub(r"\s+", " ", s)
         
-        # Remove hyphens, special chars, and normalize spacing
-        name = name.replace('-', ' ')
-        name = re.sub(r'[^a-z0-9\s]', '', name)
-        parts = name.split()
+        parts = s.split()
         
-        # Use first and last name only to avoid middle initial mismatches
-        if len(parts) >= 2:
-            return f"{parts[0]} {parts[-1]}"
-        return name
+        # Strip known suffixes
+        strip_tokens = {'jr', 'sr', 'ii', 'iii', 'iv', 'v', 'esq', 'phd', 'md', 'dds', 'mr', 'mrs', 'ms', 'dr', 'prof'}
+        
+        cleaned_parts = []
+        for p in parts:
+            if p in strip_tokens:
+                continue
+            # Drop single-letter token (middle initial) only if name has 3+ tokens
+            if len(p) == 1 and len(parts) >= 3:
+                continue
+            cleaned_parts.append(p)
+            
+        # Return sorted tokens so that FIRST LAST and LAST FIRST match exactly
+        return " ".join(sorted(cleaned_parts))
 
     def is_valid_employee_name(self, raw_full_name):
         """Skip summary/total rows from source files."""
@@ -240,7 +250,8 @@ class DynamicCensusFiller:
                         extracted_name=extracted_full_name,
                         invoice_name=data.get('raw_name', extracted_full_name),
                         extracted_coverage_tier=extracted_coverage_tier,
-                        invoice_coverage_tier=data.get('coverage')
+                        invoice_coverage_tier=data.get('coverage'),
+                        name_is_matched=True
                     )
 
                     ws.cell(row=row_idx, column=self.target_columns['plan']).value = data['plan']

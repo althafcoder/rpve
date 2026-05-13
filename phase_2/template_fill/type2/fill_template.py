@@ -50,20 +50,37 @@ class DynamicCensusFiller:
     # Name normalisation
     # ------------------------------------------------------------------
     def normalize_name(self, name):
-        """Normalise to 'first last' lowercase, handles 'Last, First' format."""
-        if not name or (isinstance(name, float) and pd.isna(name)):
-            return ""
-        name = str(name).lower().strip()
-        if ',' in name:
-            parts = [p.strip() for p in name.split(',')]
+        """Intelligent name normalization for robust matching."""
+        if not name or (isinstance(name, float) and pd.isna(name)): return ""
+        
+        s = str(name).lower().strip()
+        
+        # Handle "Last, First" format
+        if ',' in s:
+            parts = [p.strip() for p in s.split(',')]
             if len(parts) >= 2:
-                name = f"{parts[1]} {parts[0]}"
-        name = name.replace('-', ' ')
-        name = re.sub(r'[^a-z0-9\s]', '', name)
-        parts = name.split()
-        if len(parts) >= 2:
-            return f"{parts[0]} {parts[-1]}"
-        return name
+                s = f"{parts[1]} {parts[0]}"
+                
+        # Remove punctuation
+        s = re.sub(r"[^a-z\s]", " ", s)
+        s = re.sub(r"\s+", " ", s)
+        
+        parts = s.split()
+        
+        # Strip known suffixes
+        strip_tokens = {'jr', 'sr', 'ii', 'iii', 'iv', 'v', 'esq', 'phd', 'md', 'dds', 'mr', 'mrs', 'ms', 'dr', 'prof'}
+        
+        cleaned_parts = []
+        for p in parts:
+            if p in strip_tokens:
+                continue
+            # Drop single-letter token (middle initial) only if name has 3+ tokens
+            if len(p) == 1 and len(parts) >= 3:
+                continue
+            cleaned_parts.append(p)
+            
+        # Return sorted tokens so that FIRST LAST and LAST FIRST match exactly
+        return " ".join(sorted(cleaned_parts))
 
     def is_valid_employee_name(self, raw_full_name):
         """Skip summary/total rows from source files."""
@@ -330,6 +347,7 @@ class DynamicCensusFiller:
                         invoice_name=data['raw_name'],
                         extracted_coverage_tier=coverage,
                         invoice_coverage_tier=data['coverage'],
+                        name_is_matched=True,
                     )
 
                     plan_cell.value = data['plan']
