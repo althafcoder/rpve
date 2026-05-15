@@ -292,6 +292,7 @@ def _find_columns(ws) -> dict[str, int | None]:
         current_cols = {
             'name': None, 'first': None, 'last': None,
             'plan': None, 'premium': None, 'disc': None,
+            'relation': None,   # NEW — Relationship / Relation column (EE / CH / SP)
         }
         
         for c, v in row_vals.items():
@@ -306,7 +307,9 @@ def _find_columns(ws) -> dict[str, int | None]:
             elif 'plan' in v:
                 current_cols['plan'] = c; score += 1
             elif 'discrep' in v:
-                current_cols['disc'] = c; score += 3 # High weight for validation column
+                current_cols['disc'] = c; score += 3  # High weight for validation column
+            elif 'relation' in v and 'discrep' not in v:  # catches 'Relationship', 'Relation', 'Relationship to Employee', etc.
+                current_cols['relation'] = c; score += 1
         
         if score > best_score and (current_cols['first'] or current_cols['name']):
             best_score = score
@@ -393,15 +396,17 @@ def run_validation(
     invoice_path: str | Path,
     output_path: str | Path | None = None,
     threshold: float = 85.0,
+    template_type: str = 'type1',  # CH/SP skip applies ONLY for type1 (Engage)
 ) -> dict:
     """
     Core validation logic — works for type1, type2, and type3 filled Excels.
 
     Args:
-        filled_path   — Excel produced by fill_template.py
-        invoice_path  — Phase 1 extraction Excel
-        output_path   — destination for validated Excel (default: _validated.xlsx)
-        threshold     — fuzzy match confidence threshold (0-100)
+        filled_path    — Excel produced by fill_template.py
+        invoice_path   — Phase 1 extraction Excel
+        output_path    — destination for validated Excel (default: _validated.xlsx)
+        threshold      — fuzzy match confidence threshold (0-100)
+        template_type  — 'type1' | 'type2' | 'type3'  (CH/SP skip only for type1)
 
     Returns:
         dict with validation statistics and audit log entries
@@ -474,6 +479,14 @@ def run_validation(
     claimed_invoices = set()
     rows_to_delete = []
 
+    # Relation values that identify a dependent (Child or Spouse).
+    # If the template has a Relationship column and a row is CH/SP → skip.
+    # Applies to ANY template type. If no Relationship column exists,
+    # rel_col stays None and the guard below never fires.
+    _DEPENDENT_RELATIONS = {'ch', 'sp', 'child', 'spouse', 'dependent', 'dep'}
+
+    rel_col = col_positions.get('relation')  # None if template has no Relationship column
+
     for row_idx in range(data_start, ws.max_row + 1):
         # Stop at first completely empty row
         row_is_empty = all(
@@ -482,6 +495,17 @@ def run_validation(
         )
         if row_is_empty:
             break
+
+        # ── DEPENDENT SKIP (CH / SP) ─────────────────────────────────────
+        # If the Relationship column exists and this row is a dependent,
+        # skip it entirely.  Phase 2 never fills Plan / Premium / Discrepancy
+        # for dependents, so attempting to validate them would be pointless
+        # and could inflate "unresolved" counts incorrectly.
+        if rel_col is not None:
+            rel_val = str(ws.cell(row=row_idx, column=rel_col).value or '').strip().lower()
+            if rel_val in _DEPENDENT_RELATIONS:
+                logger.debug(f"  Row {row_idx}: skipping dependent row (relation='{rel_val.upper()}')")
+                continue   # <-- nothing to do for CH / SP rows
 
         # Skip discrepancy logic if column was not found
         if disc_col is None:
@@ -704,6 +728,11 @@ def main() -> int:
         '--threshold', type=float, default=85.0,
         help='Fuzzy match minimum confidence 0-100 (default: 85)'
     )
+    parser.add_argument(
+        '--template-type', dest='template_type', default='type1',
+        choices=['type1', 'type2', 'type3'],
+        help='Template type — CH/SP dependent-skip only applies to type1 (Engage). Default: type1'
+    )
     args = parser.parse_args()
 
     result = run_validation(
@@ -711,6 +740,7 @@ def main() -> int:
         invoice_path  = args.invoice_excel,
         output_path   = args.output,
         threshold     = args.threshold,
+        template_type = args.template_type,
     )
 
     if not result:

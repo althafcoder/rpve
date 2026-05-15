@@ -218,6 +218,7 @@ async def run_flow(pdf_path: str, template_path: str, ref_census_path: str = Non
             phase1_output_excel,          # invoice extraction (Phase 1 output)
             str(validated_report_path),   # validated output (Phase 3 final)
             "--threshold", "85",          # fuzzy match confidence threshold
+            "--template-type", template_type,  # CH/SP skip only for type1 (Engage)
         ]
         print(f"    Running command: {' '.join(val_cmd)}")
         val_result = subprocess.run(val_cmd, capture_output=True, text=True)
@@ -249,7 +250,8 @@ async def run_flow(pdf_path: str, template_path: str, ref_census_path: str = Non
             sys.executable, str(llm_script),
             str(validated_report_path),
             str(audit_json_path),
-            "--output", str(llm_report_path)
+            "--output", str(llm_report_path),
+            "--template-type", template_type,   # pass type so LLM knows CH/SP rule applies only for type3
         ]
         print(f"    Running command: {' '.join(llm_cmd)}")
         llm_result = subprocess.run(llm_cmd, capture_output=True, text=True)

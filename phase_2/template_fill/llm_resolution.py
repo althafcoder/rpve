@@ -22,7 +22,12 @@ _FILL_LLM = PatternFill('solid', start_color='DDEBF7')  # Light blue
 _CENTER = Alignment(horizontal='center', vertical='center')
 _LEFT = Alignment(horizontal='left', vertical='center')
 
-def run_llm_resolution(validated_excel: Path, audit_json: Path, output_excel: Path = None) -> dict:
+def run_llm_resolution(
+    validated_excel: Path,
+    audit_json: Path,
+    output_excel: Path = None,
+    template_type: str = 'type3',   # NEW — determines if CH/SP dependent-skip applies
+) -> dict:
     if not validated_excel.exists() or not audit_json.exists():
         logger.error("Missing input files for LLM resolution.")
         return {}
@@ -112,15 +117,21 @@ def run_llm_resolution(validated_excel: Path, audit_json: Path, output_excel: Pa
     )
 
     # Find columns
-    plan_col, prem_col, disc_col = None, None, None
+    plan_col, prem_col, disc_col, rel_col = None, None, None, None
     for r in range(1, 40):
         for c in range(1, min(ws.max_column + 1, 60)):
             val = str(ws.cell(row=r, column=c).value or '').strip().lower()
-            if 'plan' in val: plan_col = c
-            if 'premium' in val: prem_col = c
-            if 'discrep' in val: disc_col = c
+            if 'plan' in val:                                plan_col = c
+            if 'premium' in val:                             prem_col = c
+            if 'discrep' in val:                             disc_col = c
+            if 'relation' in val and 'discrep' not in val:   rel_col  = c  # EE/CH/SP column
         if plan_col and prem_col and disc_col:
             break
+
+    # Dependent relations — skip CH/SP rows for ANY template type that has
+    # a Relationship column. If no such column exists, rel_col stays None
+    # and the guard below never fires.
+    _DEPENDENT_RELATIONS = {'ch', 'sp', 'child', 'spouse', 'dependent', 'dep'}
 
     match_count = 0
     target_invoice_raw_names = set()
@@ -134,6 +145,16 @@ def run_llm_resolution(validated_excel: Path, audit_json: Path, output_excel: Pa
         target_invoice = invoice_map.get(str(i_name).strip().lower())
 
         if target_row and target_invoice and disc_col:
+            # ── Guard: never fill a dependent (CH / SP) row ──────────────
+            if rel_col is not None:
+                rel_val = str(ws.cell(row=target_row, column=rel_col).value or '').strip().lower()
+                if rel_val in _DEPENDENT_RELATIONS:
+                    logger.warning(
+                        f"LLM proposed match for dependent row {target_row} "
+                        f"(relation='{rel_val.upper()}', name='{c_name}') — SKIPPED."
+                    )
+                    continue
+
             logger.info(f"Applying match: Row {target_row} ({c_name}) -> Invoice ({target_invoice['raw_name']})")
             if plan_col and target_invoice.get('plan'):
                 cell = ws.cell(row=target_row, column=plan_col)
@@ -201,12 +222,18 @@ if __name__ == "__main__":
     parser.add_argument("validated_excel")
     parser.add_argument("audit_json")
     parser.add_argument("--output", default=None)
+    parser.add_argument(
+        "--template-type", dest="template_type", default="type3",
+        choices=["type1", "type2", "type3"],
+        help="Template type from flow_orchestrator. CH/SP skip guard only applies to type3 (engage)."
+    )
     args = parser.parse_args()
 
     result = run_llm_resolution(
         Path(args.validated_excel),
         Path(args.audit_json),
-        Path(args.output) if args.output else None
+        Path(args.output) if args.output else None,
+        template_type=args.template_type,
     )
     if result.get('output_path'):
         print(f"LLM Output: {result['output_path']}")

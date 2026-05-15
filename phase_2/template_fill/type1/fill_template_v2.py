@@ -23,6 +23,7 @@ class DynamicCensusFiller:
         }
         self.discrepancy_column = None
         self.census_coverage_column = None
+        self.relation_column = None  # Column holding EE / CH / SP values
     
     def normalize_name(self, name):
         """Intelligent name normalization for robust matching."""
@@ -178,6 +179,15 @@ class DynamicCensusFiller:
                     return c
         return 7
 
+    def find_relation_column(self, ws):
+        """Find the Relationship / Relation column (holds EE, CH, SP values)."""
+        for r in range(1, 40):
+            for c in range(1, ws.max_column + 1):
+                value = ws.cell(row=r, column=c).value
+                if value and 'relation' in str(value).strip().lower():
+                    return c
+        return None
+
     def fill_template(self, template_path, output_path):
         """Fills the template form dynamically."""
         try:
@@ -205,6 +215,9 @@ class DynamicCensusFiller:
             
             self.discrepancy_column = self.find_discrepancy_column(ws)
             self.census_coverage_column = self.find_coverage_column(ws)
+            self.relation_column = self.find_relation_column(ws)
+            if self.relation_column:
+                logger.info(f"Relationship column found at index {self.relation_column}. CH/SP rows will be skipped.")
             if self.discrepancy_column:
                 logger.info(f"Using Discrepancies column at index {self.discrepancy_column}.")
             else:
@@ -239,7 +252,18 @@ class DynamicCensusFiller:
                 norm_name = self.normalize_name(f"{first} {last}")
                 seen_census_names.add(norm_name)
                 last_data_row = row_idx
-                
+
+                # ── DEPENDENT SKIP (CH / SP) ────────────────────────────────
+                # Dependents don't have their own invoice line — never fill
+                # Plan / Premium / Discrepancy for them.
+                if self.relation_column is not None:
+                    rel_val = str(
+                        ws.cell(row=row_idx, column=self.relation_column).value or ''
+                    ).strip().lower()
+                    if rel_val in ('ch', 'sp', 'child', 'spouse', 'dependent', 'dep'):
+                        logger.debug(f"  Skipping dependent row {row_idx}: {first} {last} (relation='{rel_val.upper()}')")
+                        continue   # leave Plan / Premium / Discrepancy blank
+
                 if norm_name in self.source_lookup:
                     data = self.source_lookup[norm_name]
                     extracted_full_name = f"{first} {last}".strip()
