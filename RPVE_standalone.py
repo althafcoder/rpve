@@ -408,14 +408,14 @@ def extract_text(pdf_path: Path, max_pages: int = 1000) -> str:
     # If this is a wide-layout carrier like BlueCross or IBX, standard 
     # vertical extraction often shreds rows. We force the high-accuracy 
     # layout-preserving OCR fallback for these specifically.
-    WIDE_KEYWORDS = ["BLUE CROSS", "INDEPENDENCE", "BCBS", "CAPITAL BLUE", "IBX", "BLUE SHIELD"]
+    WIDE_KEYWORDS = ["BLUE CROSS", "INDEPENDENCE", "BCBS", "CAPITAL BLUE", "IBX", "BLUE SHIELD", "UNITEDHEALTHCARE", "UHC", "UNITED HEALTHCARE"]
     is_wide_carrier = any(kw in extracted_upper for kw in WIDE_KEYWORDS)
 
     print(f"[RPVE] Extraction check: quality={text_quality_score:.2f}, is_wide={is_wide_carrier}")
 
     if (not text.strip() 
         or not any(kw in extracted_upper for kw in VALID_KEYWORDS)
-        or text_quality_score < 0.55
+        or text_quality_score < 0.75
         or is_wide_carrier):
         
         reason = ""
@@ -612,6 +612,11 @@ def classify(text: str) -> str:
     if "EMPLOYER NAME" in t and "BILLING DATE" in t and "TOTAL AMOUNT" in t:
         print("[RPVE] Detected summary-only invoice format, treating as engage type.")
         return "engage"
+
+    # Priority 4: Check for UnitedHealthcare
+    if "UNITEDHEALTHCARE" in t or "UHC" in t:
+        print("[RPVE] Detected UnitedHealthcare format.")
+        return "generic"
     
     print("[RPVE] No specific keywords matched. Using GENERIC extractor.")
     return "generic"
@@ -647,7 +652,7 @@ def extract_with_llm(sub_type: str, text: str, ev_mode: bool = False) -> dict:
     """
     Calls the LLM to extract structured summary and employee data.
     Uses carrier-specific prompts if available, otherwise falls back to a standard prompt.
-    """
+    """               
     # Clean the text to handle multi-page table fragmentation
     text = clean_invoice_text(text)
     
