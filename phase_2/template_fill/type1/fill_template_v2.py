@@ -146,12 +146,35 @@ class DynamicCensusFiller:
                 if not self.is_valid_employee_name(raw_full_name):
                     continue
 
-                self.source_lookup[name_key] = {
-                    'plan': plan,
-                    'premium': premium,
-                    'raw_name': raw_full_name,
-                    'coverage': row[cols['coverage']] if cols['coverage'] else None
-                }
+                # Helper to determine plan priority score
+                def get_plan_priority(p_str):
+                    if not p_str: return 0
+                    p_lower = str(p_str).lower()
+                    ancillary = ['vision', 'dental', 'life', 'ad&d', 'ltd', 'std', 'disability', 'voluntary', 'basic']
+                    if any(kw in p_lower for kw in ancillary):
+                        return 1
+                    return 2 # Primary Medical plan
+
+                cov = row[cols['coverage']] if cols['coverage'] else None
+
+                if name_key in self.source_lookup:
+                    existing = self.source_lookup[name_key]
+                    # Update plan only if new plan has higher priority (e.g. Medical > Vision)
+                    if get_plan_priority(plan) > get_plan_priority(existing['plan']):
+                        existing['plan'] = plan
+                        existing['raw_name'] = raw_full_name
+                        if cov: existing['coverage'] = cov
+                    # Keep the maximum premium (cumulative total)
+                    cur_prem = existing['premium'] if existing['premium'] is not None else 0
+                    new_prem = premium if premium is not None else 0
+                    existing['premium'] = max(cur_prem, new_prem)
+                else:
+                    self.source_lookup[name_key] = {
+                        'plan': plan,
+                        'premium': premium,
+                        'raw_name': raw_full_name,
+                        'coverage': cov
+                    }
             
             return True
         except Exception as e:

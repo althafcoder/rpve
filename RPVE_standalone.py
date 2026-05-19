@@ -634,7 +634,29 @@ def clean_invoice_text(text: str) -> str:
     header_footer_pattern = re.compile(r"""
         ^\s*page\s+\d+\s+of\s+\d+\s*$|
         copyright\s+©\s+.*adp,\s+inc|
-        ^\s*Name\s+Provider\s+Plan\s+Coverage\s+Type\s+Month\s+Cost\s*$
+        ^\s*Name\s+Provider\s+Plan\s+Coverage\s+Type\s+Month\s+Cost\s*$|
+        ^\s*---\s*Page\s+\d+\s*---\s*$|
+        ^\s*Consolidated\s+Customer\s+No.*$|
+        ^\s*Customer\s+No.*Invoice\s+No.*$|
+        ^\s*Invoice\s+Date:.*$|
+        ^\s*Bill\s+Group:.*$|
+        ^\s*Coverage\s+Period:.*$|
+        ^\s*Due\s+Date:.*$|
+        ^\s*Details\s*$|
+        ^\s*Current\s+Detail\s+-.*$|
+        ^\s*Policy\s+Name\s+Plan\s+ID.*$|
+        ^\s*No\.\s+\(000's\)\s+Amount.*$|
+        ^\s*Coverage\s+Type\s+Status\s+Code\s*$|
+        ^\s*E\s+Employee\s+Only.*$|
+        ^\s*ES\s+Employee\s+and\s+Spouse.*$|
+        ^\s*ESC\s+Employee\s+and\s+Family.*$|
+        ^\s*EC\s+Employee\s+and\s+Child.*$|
+        ^\s*E1D\s+Employee\s+and\s+One.*$|
+        ^\s*E2D\s+Employee\s+and\s+Two.*$|
+        ^\s*E3D\s+Employee\s+and\s+Three.*$|
+        ^\s*Questions\?.*$|
+        ^\s*d50\s+WWA.*$|
+        ^\s*w\.\s+n\s+asennces.*$
     """, re.IGNORECASE | re.VERBOSE)
 
     for line in lines:
@@ -694,10 +716,6 @@ The plan name MUST match the FULL string found in the "Plan" column of the PDF.
 Data is typically organized as a Header Row (Name + First Plan) followed by Indented Rows (Additional Plans). 
 The pre-processor has marked these as '[SUB-ROW]'. You MUST split these [SUB-ROW] markers into separate individual plan records for the same employee.
 
-🔹 PAGE BREAK CONTINUATIONS (CRITICAL):
-If you see an employee's data interrupted or continued, associate all subsequent plan lines with that specific employee until a new Name is encountered. 
-Do NOT create unnamed records for orphaned plan lines.
-
 🔹 NAME FORMATTING (CRITICAL):
 Names are often printed as "LastName, FirstName" or "LastName, FirstName Middle" (e.g. "Smith, John Adam"). Properly identify and split the `last_name` and `first_name` without inverting them.
 
@@ -721,10 +739,19 @@ Names are often printed as "LastName, FirstName" or "LastName, FirstName Middle"
 - Do NOT skip any rows. Even if a row has partial data, extract what is available.
 - If the document contains a roster (like IBX or BCBS), expect dozens of members. You must continue until the very end of the list.
 
+🔹 PAGE BREAK CONTINUATIONS (CRITICAL):
+If you see an employee's data interrupted or continued across pages, associate all subsequent plan lines with that specific employee until a new Name is encountered. Do NOT create unnamed records for orphaned plan lines.
+
 🔹 KEY RULES:
 - One row per individual member.
 - Strictly adhere to JSON format.
 - Do not hallucinate, but do not omit valid rows.
+
+🔹 UNITEDHEALTHCARE / GENERIC INVOICE PLAN NAMES (CRITICAL RULE):
+In UnitedHealthcare and similar invoices, the Plan Name column is frequently split across two lines:
+  - Line 1 contains the alphanumeric plan prefix/code (e.g., "P15003050I8021B_6700", "HP6000I7025B_670079", or "P2503050I8022B_67006").
+  - Line 2 contains the plan suffix and description (e.g., "70 - Max Claims Liability", "3 - Max Claims Liability", or "Max Claims Liability").
+You MUST NEVER treat the alphanumeric prefix as an ignored group/policy code. You MUST concatenate Line 1 and Line 2 together into a single complete string (e.g., "P15003050I8021B_670070 - Max Claims Liability" or "P2503050I8022B_670063 - Max Claims Liability"). Do NOT truncate or omit the alphanumeric prefix!
 
 🔹 INSPERITY / MANIFEST MEDEX:
 - If column headers include "Coverage Type" and "Coverage Option", map "Coverage Type" -> `plan_type` and "Coverage Option" -> `plan_name`. Do not mix them up.
