@@ -50,7 +50,12 @@ def run_llm_resolution(
 
     if not unresolved_census or not unclaimed:
         logger.info("No unresolved census names or unclaimed invoices to process via LLM.")
-        return {'status': 'skipped', 'matches': 0, 'output_path': str(validated_excel)}
+        if output_excel is None:
+            output_excel = validated_excel.with_name(validated_excel.name.replace("VALIDATED_", "LLM_RESOLVED_"))
+        import shutil
+        shutil.copy2(str(validated_excel), str(output_excel))
+        logger.info(f"Saved (skipped) LLM output to {output_excel}")
+        return {'status': 'skipped', 'matches': 0, 'output_path': str(output_excel)}
 
     logger.info(f"LLM Resolution: {len(unresolved_census)} unresolved census names vs {len(unclaimed)} unclaimed invoices.")
 
@@ -101,7 +106,15 @@ def run_llm_resolution(
 
     if not matches:
         logger.info("LLM found no confident matches.")
-        return {'status': 'completed', 'matches': 0, 'output_path': str(validated_excel)}
+        # Still write the output file so the orchestrator's file-existence check
+        # passes and does not incorrectly raise [WARN Phase 4 failed or skipped].
+        # wb is not loaded yet here, so just copy the validated Excel unchanged.
+        if output_excel is None:
+            output_excel = validated_excel.with_name(validated_excel.name.replace("VALIDATED_", "LLM_RESOLVED_"))
+        import shutil
+        shutil.copy2(str(validated_excel), str(output_excel))
+        logger.info(f"Saved (no-match) LLM output to {output_excel}")
+        return {'status': 'completed', 'matches': 0, 'output_path': str(output_excel)}
 
     logger.info(f"LLM proposed {len(matches)} matches.")
 
@@ -190,13 +203,25 @@ def run_llm_resolution(
     # Delete the appended "Not on census" rows for the invoices we just matched
     rows_to_delete = set()
     if disc_col and target_invoice_raw_names:
+        import re
+        def clean_name_for_compare(name: str) -> str:
+            s = name.strip().lower()
+            if ',' in s:
+                parts = [p.strip() for p in s.split(',')]
+                s = f"{parts[1]} {parts[0]}" if len(parts) >= 2 else s
+            s = re.sub(r"[^a-z0-9\s]", " ", s)
+            s = re.sub(r"\s+", " ", s)
+            return s.strip()
+            
+        target_invoice_cleaned = {clean_name_for_compare(n) for n in target_invoice_raw_names if n}
+        
         for row_idx in range(1, ws.max_row + 1):
             disc_val = str(ws.cell(row=row_idx, column=disc_col).value or "").strip().lower()
             if "not on census" in disc_val:
                 first = str(ws.cell(row=row_idx, column=2).value or "").strip()
                 last = str(ws.cell(row=row_idx, column=3).value or "").strip()
-                appended_name = f"{first} {last}".strip().lower()
-                if appended_name in target_invoice_raw_names:
+                appended_name = f"{first} {last}".strip()
+                if clean_name_for_compare(appended_name) in target_invoice_cleaned:
                     rows_to_delete.add(row_idx)
 
     for r in sorted(list(rows_to_delete), reverse=True):

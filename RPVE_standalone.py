@@ -670,11 +670,60 @@ def clean_invoice_text(text: str) -> str:
     return cleaned_text
 
 
+def split_multi_invoice_text(text: str) -> list[str]:
+    # Find all occurrences of page 1 of X
+    pattern = re.compile(r'(page\s+1\s+of\s+\d+)', re.IGNORECASE)
+    matches = list(pattern.finditer(text))
+    if not matches:
+        return [text]
+        
+    parts = []
+    for i in range(len(matches)):
+        start = matches[i].start()
+        end = matches[i+1].start() if i + 1 < len(matches) else len(text)
+        parts.append(text[start:end])
+    return parts
+
+
 def extract_with_llm(sub_type: str, text: str, ev_mode: bool = False) -> dict:
     """
     Calls the LLM to extract structured summary and employee data.
     Uses carrier-specific prompts if available, otherwise falls back to a standard prompt.
     """               
+    # Check for multiple concatenated invoices
+    parts = split_multi_invoice_text(text)
+    if len(parts) > 1:
+        print(f"[RPVE] Found {len(parts)} multi-invoice parts. Processing each part separately...")
+        all_employees = []
+        final_summary = {}
+        for idx, part in enumerate(parts, 1):
+            print(f"[RPVE] Processing invoice part {idx}/{len(parts)}...")
+            part_result = extract_with_llm(sub_type, part, ev_mode)
+            part_summary = part_result.get("summary", {})
+            part_employees = part_result.get("employees", [])
+            for emp in part_employees:
+                # Copy summary fields to the employee dictionary
+                for k, v in part_summary.items():
+                    emp[k.lower()] = v
+            all_employees.extend(part_employees)
+            if not final_summary:
+                final_summary = part_summary
+            else:
+                # Accumulate/Merge total_amount_due if applicable
+                t_keys = ["total_amount_due", "total_cost", "grand_total"]
+                for tk in t_keys:
+                    if tk in part_summary and tk in final_summary:
+                        try:
+                            val1 = float(re.sub(r'[^\d.-]', '', str(final_summary[tk])))
+                            val2 = float(re.sub(r'[^\d.-]', '', str(part_summary[tk])))
+                            final_summary[tk] = f"${(val1 + val2):,.2f}"
+                        except:
+                            pass
+        return {
+            "summary": final_summary,
+            "employees": all_employees
+        }
+
     # Clean the text to handle multi-page table fragmentation
     text = clean_invoice_text(text)
     
@@ -1127,7 +1176,9 @@ def build_json_file(data: dict, sub_type: str, stem: str, active_employee_fields
 
     rows = []
     for emp in employees:
-        row = {k.upper(): v for k, v in summary.items()}
+        row = {}
+        for k, v in summary.items():
+            row[k.upper()] = emp.get(k.lower(), v)
         # Only include required fields - strip everything else
         for col in required:
             row[col] = emp.get(col.lower(), "")
@@ -1320,11 +1371,15 @@ async def process_invoice_data(file_path: Path, original_filename: str):
                 ptype = str(emp.get("plan_type") or "").strip().upper()
                 copt  = str(emp.get("coverage_option") or "").strip().upper()
                 if any(x in pname or x in ptype or x in copt for x in ("TOTAL", "SUBTOTAL", "GRAND TOTAL")): continue
-                key = (str(emp.get("first_name", "")).strip().upper(), str(emp.get("last_name", "")).strip().upper())
+                key = (
+                    str(emp.get("first_name", "")).strip().upper(),
+                    str(emp.get("last_name", "")).strip().upper(),
+                    str(emp.get("company_name", "")).strip().upper()
+                )
                 grouped2[key].append(emp)
 
             collapsed = []
-            for (fname, lname), rows in grouped2.items():
+            for (fname, lname, company_name), rows in grouped2.items():
                 if not rows: continue
                 parsed_rows = []
                 for r in rows:

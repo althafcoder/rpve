@@ -8,7 +8,11 @@ logger = logging.getLogger(__name__)
 CENSUS_COL_RULES = {
     'insured':   ['insured name', 'insured'],
     'emp_dep':   ['employee or dependent', 'emp or dep', 'relationship type', 'member type', 'relationship'],
-    'coverage':  ['medical plan coverage', 'coverage level', 'coverage tier', 'enrollment status', 'medical:', 'medical', 'coverage'],
+    # NOTE: 'medical' and 'medical:' intentionally excluded — census columns named "Medical" or
+    # "Medical Plan" often contain plan-name strings (e.g. "2026 CDPHP Bronze HDEPO"), not
+    # coverage tiers (EE/ES/EC/FAM). Those columns are captured by 'plan_desc' below.
+    'coverage':  ['coverage level', 'coverage tier', 'enrollment status', 'coverage code',
+                  'benefit level', 'tier', 'coverage'],
     'first':     ['first name', 'first', 'given name'],
     'last':      ['last name', 'last', 'surname'],
     'fullname':  ['full name', 'full_name', 'member name', 'employee name', 'name'],
@@ -16,7 +20,9 @@ CENSUS_COL_RULES = {
     'dob':       ['date of birth', 'dob', 'birth date', 'birth', 'birthdate'],
     'zip':       ['zip code', 'zip', 'postal code', 'home zip'],
     'dep_rel':   ['dependent relation', 'dep relation'],
-    'plan_desc': ['medical plan', 'plan description', 'plan name', 'plan'],
+    # 'medical plan' and 'medical' added here so plan-name columns are correctly classified
+    'plan_desc': ['medical plan coverage', 'medical plan', 'medical:', 'medical',
+                  'plan description', 'plan name', 'plan'],
 }
 
 EMP_MARKERS = {
@@ -38,7 +44,7 @@ def _is_valid_row(first, last, fullname):
     """Filters out summary or empty rows."""
     text = f"{first} {last} {fullname}".lower()
     if not text.strip(): return False
-    blocked = ('total', 'summary', 'record', 'employee details', 'report')
+    blocked = ('total', 'summary', 'record', 'employee details', 'report', 'census')
     return not any(b in text for b in blocked)
 
 def normalize_coverage_code(val):
@@ -56,19 +62,65 @@ def normalize_coverage_code(val):
 def detect_census_columns(df: pd.DataFrame) -> dict:
     col_map = {}
     cols = list(df.columns)
+    
+    # Collect all candidate matches: (col_name, col_idx, field_name, score)
+    candidates = []
     for i, col in enumerate(cols):
         cl = str(col).lower().strip()
+        if 'unnamed' in cl:
+            continue
         for field, keywords in CENSUS_COL_RULES.items():
-            if field in col_map: continue
+            # Skip fullname mapping if the column is clearly a middle name column
+            if field == 'fullname' and 'middle' in cl:
+                continue
             for kw in keywords:
                 if kw in cl:
-                    col_map[field] = col
-                    # Special case: "Employee Name" might be followed by an unnamed first name column
-                    if field == 'fullname' and i + 1 < len(cols):
-                        next_col = cols[i+1]
-                        if 'unnamed' in str(next_col).lower():
-                            col_map['first_name_extra'] = next_col
-                    break
+                    score = len(kw)
+                    # Penalize dependent DOB columns so employee DOB wins for the 'dob' field
+                    if field == 'dob' and any(dep in cl for dep in ['spouse', 'child', 'dep', 'relative']):
+                        score -= 15
+                    
+                    candidate_field = field
+                    # Validate if plan_desc column actually contains coverage tiers/status codes rather than plan descriptions
+                    if candidate_field == 'plan_desc':
+                        col_values = df[col].dropna().astype(str).str.strip().str.upper().tolist()
+                        clean_vals = [re.sub(r'[\s+()\-]', '', v) for v in col_values]
+                        known_tier_codes = {
+                            'EE', 'ES', 'EC', 'FAM', 'SP', 'CH', 'NC', 'NE', 'W', 'C', 'EE ONLY', 'FAMILY', 'WAIVER',
+                            'E', 'S', 'CH', 'F', 'NC', 'NE', 'WO', 'RC', 'C', 'EMPLOYEE', 'EMPLOYEE ONLY',
+                            'EMPLOYEE + SPOUSE', 'EMPLOYEE + CHILD(REN)', 'EMPLOYEE + SP + CHILD(REN)',
+                            'EMPLOYEE/SPOUSE', 'EMPLOYEE/CHILDREN', 'EMPLOYEE/FAMILY',
+                            'EMPLOYEE + FAMILY'
+                        }
+                        matching_count = sum(1 for v in clean_vals if v in known_tier_codes or len(v) <= 4)
+                        total_count = len(clean_vals)
+                        if total_count > 0 and (matching_count / total_count) > 0.7:
+                            candidate_field = 'coverage'
+
+                    candidates.append((col, i, candidate_field, score))
+                    
+    # Sort candidates by score descending
+    candidates.sort(key=lambda x: x[3], reverse=True)
+    
+    # Resolve matches greedily (highest score first)
+    mapped_cols = set()
+    mapped_fields = set()
+    
+    for col, idx, field, score in candidates:
+        if col in mapped_cols or field in mapped_fields:
+            continue
+            
+        col_map[field] = col
+        mapped_cols.add(col)
+        mapped_fields.add(field)
+        
+        # Handle special ADP TotalSource / generic fullname extras
+        if field == 'fullname' and idx + 1 < len(cols):
+            next_col = cols[idx+1]
+            if 'unnamed' in str(next_col).lower() and next_col not in mapped_cols:
+                col_map['first_name_extra'] = next_col
+                mapped_cols.add(next_col)
+
     return col_map
 
 def get_val(row, col_map, field, default=''):
@@ -85,8 +137,33 @@ def normalize_census_to_list(path):
     """
     xl = pd.ExcelFile(path)
     
-    # Identify Sheets
-    emp_sheet = next((s for s in xl.sheet_names if any(k in s.lower() for k in ('census', 'employee', 'member', 'data'))), xl.sheet_names[0])
+    # Identify Sheets with priority
+    emp_sheet = None
+    # Priority 1: Exact or substring match for 'census' (avoiding 'census help' if plain 'census' exists)
+    for s in xl.sheet_names:
+        if 'census' in s.lower():
+            if s.lower() == 'census help' and any(x.lower() == 'census' for x in xl.sheet_names):
+                continue
+            emp_sheet = s
+            break
+            
+    # Priority 2: Match for 'employee', 'member', 'active'
+    if not emp_sheet:
+        for s in xl.sheet_names:
+            if any(k in s.lower() for k in ('employee', 'member', 'active')):
+                emp_sheet = s
+                break
+                
+    # Priority 3: Match for 'data'
+    if not emp_sheet:
+        for s in xl.sheet_names:
+            if 'data' in s.lower():
+                emp_sheet = s
+                break
+                
+    if not emp_sheet:
+        emp_sheet = xl.sheet_names[0]
+        
     dep_sheet = next((s for s in xl.sheet_names if s != emp_sheet and any(k in s.lower() for k in ('dependent', 'relative', 'family'))), None)
     
     # 1. Parse Employees
@@ -130,7 +207,7 @@ def _link_external_dependents(path, sheet_name, employees):
     if not emp_link_col or not dep_name_col:
         logger.warning(f"Could not find link columns in dependent sheet '{sheet_name}'")
         return
-
+ 
     for _, row in df.iterrows():
         emp_raw = str(row.get(emp_link_col, '')).strip()
         dep_raw = str(row.get(dep_name_col, '')).strip()
@@ -178,6 +255,7 @@ def _parse_row_per_person(df, col_map):
     result = {}
     current_emp = None
     has_emp_dep = 'emp_dep' in col_map
+    has_coverage = 'coverage' in col_map
 
     for _, row in df.iterrows():
         first = get_val(row, col_map, 'first')
@@ -185,6 +263,13 @@ def _parse_row_per_person(df, col_map):
         fullname = get_val(row, col_map, 'fullname')
         
         if not _is_valid_row(first, last, fullname): continue
+
+        # Clean up comma typos in Last Name field (e.g. 'Hunt, Eric')
+        if last and ',' in last:
+            parts = [p.strip() for p in last.split(',')]
+            last = parts[0]
+            if not first and len(parts) > 1:
+                first = parts[1]
 
         # Improved Name Splitting
         if not first and not last:
@@ -229,19 +314,30 @@ def _parse_row_per_person(df, col_map):
         # Employee/Dependent logic
         if has_emp_dep:
             emp_dep_val = get_val(row, col_map, 'emp_dep').lower().strip()
-            is_employee = emp_dep_val in EMP_MARKERS
-            is_dependent = emp_dep_val in DEP_KEYWORDS or emp_dep_val == '0'
+            tokens = set(re.findall(r'[a-z0-9]+', emp_dep_val))
+            is_dependent = any(tok in DEP_KEYWORDS for tok in tokens) or '0' in tokens
+            is_employee = (any(tok in EMP_MARKERS for tok in tokens) or not emp_dep_val) and not is_dependent
             dep_relation = 'SP' if any(kw in emp_dep_val for kw in ('spouse', 'partner')) else 'CH'
-        else:
-            is_employee = cov_clean in EMP_MARKERS or (not cov_raw and current_emp is None)
-            is_dependent = any(kw in cov_raw.lower() for kw in DEP_KEYWORDS) or (not cov_raw and current_emp is not None)
+        elif has_coverage:
+            cov_tokens = set(re.findall(r'[a-z0-9]+', cov_raw.lower())) if cov_raw else set()
+            is_dependent = any(kw in cov_raw.lower() for kw in DEP_KEYWORDS) and not any(emp in cov_raw.lower() for emp in ('emp', 'employee', 'sub', 'subscriber')) if cov_raw else False
+            is_dependent = is_dependent or (not cov_raw and current_emp is not None)
+            is_employee = (any(tok in EMP_MARKERS for tok in cov_tokens) or (not cov_raw and current_emp is None)) and not is_dependent
             dep_relation = inferred_rel
+        else:
+            # If there are no columns to distinguish employees from dependents, treat every row as an employee
+            is_employee = True
+            is_dependent = False
+            dep_relation = None
+
 
         if is_employee and not is_dependent:
             coverage = normalize_coverage_code(cov_raw) if cov_raw else 'EE'
             current_emp = {
                 'first': first, 'last': last, 'gender': _gender_code(get_val(row, col_map, 'gender')),
-                'dob': dob, 'zip': get_val(row, col_map, 'zip'), 'coverage': coverage, 'dependents': []
+                'dob': dob, 'zip': get_val(row, col_map, 'zip'), 'coverage': coverage,
+                'plan_desc': get_val(row, col_map, 'plan_desc'),  # full plan name from census
+                'dependents': []
             }
             # Key uses first/last to avoid dups
             key = f"{first.lower()} {last.lower()}"
@@ -281,6 +377,7 @@ def _parse_grouped(df, col_map):
             'first': first, 'last': last, 'gender': _gender_code(get_val(emp, col_map, 'gender')),
             'dob': emp.get(col_map['dob']) if 'dob' in col_map else None,
             'zip': get_val(emp, col_map, 'zip'), 'coverage': coverage or 'EE',
+            'plan_desc': get_val(emp, col_map, 'plan_desc'),  # full plan name from census
             'dependents': []
         }
         

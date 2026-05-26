@@ -115,19 +115,22 @@ def _tokens(raw) -> list[str]:
     Return significant name tokens after:
       - Lowercasing and punctuation removal
       - Dropping known suffixes/titles
-      - Dropping single-letter middle initials (when ≥ 3 tokens present)
+      - Dropping middle initials (length 1 tokens between first and last tokens in a 3+ token name)
     """
     cleaned = _clean(raw)
-    parts = cleaned.split()
-    result = []
-    for p in parts:
-        if p in _STRIP_TOKENS:
-            continue
-        if len(p) == 1 and len(parts) >= 3:
-            # Drop single-letter token (middle initial) only if name has 3+ tokens
-            continue
-        result.append(p)
-    return result
+    parts = [p for p in cleaned.split() if p not in _STRIP_TOKENS]
+    if not parts:
+        return []
+        
+    if len(parts) >= 3:
+        result = [parts[0]]
+        for p in parts[1:-1]:
+            if len(p) == 1:
+                continue  # drop middle initial
+            result.append(p)
+        result.append(parts[-1])
+        return result
+    return parts
 
 
 def canonical(raw) -> str:

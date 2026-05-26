@@ -67,18 +67,22 @@ def _clean_name(name) -> str:
 def _tokens(name) -> list:
     """Return significant name tokens, removing:
     - known suffixes (jr, sr, ii, iii, etc.) from ANY position
-    - single-letter initials that are NOT the only token
+    - middle initials (length 1 tokens between first and last tokens in a 3+ token name)
     """
     raw = _clean_name(name)
-    parts = raw.split()
-    result = []
-    for i, p in enumerate(parts):
-        if p in _SUFFIXES:                          # drop suffix anywhere
-            continue
-        if len(p) == 1 and len(parts) > 2:          # drop lone initial if 3+ tokens
-            continue
-        result.append(p)
-    return result
+    parts = [p for p in raw.split() if p not in _SUFFIXES]
+    if not parts:
+        return []
+        
+    if len(parts) >= 3:
+        result = [parts[0]]
+        for p in parts[1:-1]:
+            if len(p) == 1:
+                continue  # drop middle initial
+            result.append(p)
+        result.append(parts[-1])
+        return result
+    return parts
 
 
 def _make_key(name) -> str:
@@ -315,7 +319,11 @@ def write_employee_row(ws, row_idx, data_row_num, emp, inv, cols):
     _wcell(ws, row_idx, cols.get('cobra'),    'N',             _CENTER)
 
     if inv:
-        _wcell(ws, row_idx, cols.get('plan'), inv['plan'], _LEFT)
+        # Prefer the census plan name (full, accurate) over the invoice plan name
+        # (which may be truncated or use carrier-branded naming).
+        # Fall back to invoice plan name only when census has no plan description.
+        plan_name = emp.get('plan_desc') or inv.get('plan') or ''
+        _wcell(ws, row_idx, cols.get('plan'), plan_name, _LEFT)
         if inv.get('premium') is not None:
             _wcell(ws, row_idx, cols.get('premium'), inv['premium'], _CENTER, '$#,##0.00')
 
@@ -400,6 +408,22 @@ def fill_rapt_template(invoice_path, ref_census_path, template_path, output_path
             write_dependent_row(ws, write_row, data_row_num, dep, emp_row_num, cols)
             write_row += 1; data_row_num += 1
 
+            # Mark this dependent's name as seen in the invoice so it is NOT
+            # appended again as an invoice-only "Not on census" row.
+            # This handles the case where the census lists someone as a dependent
+            # (CH) but the invoice bills them as a standalone EE subscriber.
+            for dep_k in _lookup_keys(f"{dep['first']} {dep['last']}"):
+                if dep_k in invoice_lookup:
+                    seen_invoice_keys.add(dep_k)
+                    dep_toks = dep_k.split()
+                    if len(dep_toks) == 2:
+                        seen_invoice_keys.add(f"{dep_toks[1]} {dep_toks[0]}")
+                    logger.info(
+                        f"  Dependent '{dep['first']} {dep['last']}' found on invoice "
+                        f"(key='{dep_k}') — marked as seen, will not be re-appended."
+                    )
+
+
     # --- Invoice-only rows (on invoice but NOT in ref census) ---
     for inv_key, inv in invoice_lookup.items():
         if inv_key in seen_invoice_keys:
@@ -415,11 +439,21 @@ def fill_rapt_template(invoice_path, ref_census_path, template_path, output_path
         raw    = str(inv['raw_name']).strip()
         c_name = _clean_name(raw)
         t      = [x for x in c_name.split() if x not in _SUFFIXES]
-        # Invoice is LAST FIRST — swap to First Last for the RAPT output
-        if len(t) >= 2:
-            first, last = t[-1].title(), t[0].title()
+        # Determine order and split:
+        # If raw contains a comma, the format is 'Last, First Middle' which _clean_name already swaps to 'First Middle Last'.
+        # Otherwise, the format is 'Last First Middle'.
+        if ',' in raw:
+            if len(t) >= 2:
+                first = " ".join(t[:-1]).title()
+                last = t[-1].title()
+            else:
+                first, last = (t[0].title() if t else raw), ''
         else:
-            first, last = (t[0].title() if t else raw), ''
+            if len(t) >= 2:
+                first = " ".join(t[1:]).title()
+                last = t[0].title()
+            else:
+                first, last = (t[0].title() if t else raw), ''
 
         fake_emp = {
             'first': first, 'last': last, 'gender': '',
