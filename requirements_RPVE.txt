@@ -13,3 +13,4 @@ pytesseract
 pillow
 xlrd
 rostaing-ocr
+pandas

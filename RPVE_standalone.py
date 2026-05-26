@@ -20,8 +20,10 @@ GET  /health           Health check
 GET  /                 Serves RPVE_ui.html
 """
 
+import asyncio
 import os, re, json, shutil, uuid, time
 import pdfplumber
+from contextlib import asynccontextmanager
 from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
@@ -44,8 +46,10 @@ if POPPLER_PATH and os.path.exists(POPPLER_PATH):
 BASE_DIR   = Path(__file__).parent
 UPLOAD_DIR = BASE_DIR / "rpve_uploads"
 OUTPUT_DIR = BASE_DIR / "rpve_outputs"
+JOBS_DIR   = BASE_DIR / "jobs"
 UPLOAD_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
+JOBS_DIR.mkdir(exist_ok=True)
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -1191,25 +1195,39 @@ def build_json_file(data: dict, sub_type: str, stem: str, active_employee_fields
     print(f"[RPVE] JSON  -> {json_path.name}")
     return json_path
 
-
 # ══════════════════════════════════════════════════════════════════════════════
 # FASTAPI APP
 # ══════════════════════════════════════════════════════════════════════════════
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Start background worker pool and recover stale jobs on startup."""
+    import job_store
+    import job_worker
+    recovered = job_store.recover_stale_jobs()
+    if recovered:
+        print(f"[RPVE] Recovered {recovered} stale job(s) from previous run.")
+    job_worker.start_workers()
+    print("[RPVE] Background worker pool started.")
+    yield
+    # Shutdown: nothing to tear down — worker threads are daemons.
+
 
 app = FastAPI(
     title="RPVE - Benefit Invoice Extractor",
     description="Resourcing · Prestige · Velocity · Engage",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-_cache: dict[str, str] = {}
+# NOTE: _cache removed — download routing now uses per-job directory scan (rglob).
 
 FRONTEND_DIST_DIR = BASE_DIR / "frontend" / "dist"
-
-if (FRONTEND_DIST_DIR / "assets").exists():
-    app.mount("/assets", StaticFiles(directory=FRONTEND_DIST_DIR / "assets"), name="assets")
+(FRONTEND_DIST_DIR / "assets").mkdir(parents=True, exist_ok=True)
+app.mount("/assets", StaticFiles(directory=FRONTEND_DIST_DIR / "assets"), name="assets")
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def serve_ui():
@@ -1229,19 +1247,23 @@ async def health():
     return {"status": "ok", "service": "RPVE", "sub_types": list(KEYWORDS.keys())}
 
 
-async def process_invoice_data(file_path: Path, original_filename: str):
+async def process_invoice_data(file_path: Path, original_filename: str, out_dir: Path | None = None):
     print(f"\n[RPVE] Processing -> {original_filename}")
     ext = Path(original_filename).suffix.lower()
     
     # ── UNIQUE OUTPUT PATH ────────────────────────────────────────────
-    timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
     # Clean and truncate stem for the output folder (cosmetic naming)
     safe = re.sub(r'[\\/:*?"<>|]', "_", original_filename)
     stem = Path(safe).stem.replace(" ", "_").strip()[:50]
     
-    # Create specific output directory
-    run_out_dir = OUTPUT_DIR / f"{stem}_{timestamp_str}"
+    # Use provided out_dir (job-scoped) or fall back to timestamped OUTPUT_DIR sub-dir
+    if out_dir is not None:
+        run_out_dir = out_dir
+    else:
+        timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
+        run_out_dir = OUTPUT_DIR / f"{stem}_{timestamp_str}"
     run_out_dir.mkdir(parents=True, exist_ok=True)
+
 
     try:
         # Using local extract_text function instead of missing identification module
@@ -1434,15 +1456,15 @@ async def process_invoice_data(file_path: Path, original_filename: str):
             with open(str(analysis_path), "w", encoding="utf-8") as af:
                 json.dump(analysis_data, af, indent=2, ensure_ascii=False)
             analysis_file_name = analysis_path.name
-            _cache[analysis_file_name] = str(analysis_path)
+            # NOTE: No _cache write — files are found via rglob on download.
 
     except Exception as build_err:
         import traceback
         print(f"[RPVE] Output building error:\n{traceback.format_exc()}")
         raise Exception(f"Failed to generate output files: {str(build_err)}")
 
-    _cache[xlsx_path.name] = str(xlsx_path)
-    _cache[json_path.name] = str(json_path)
+    # NOTE: _cache writes removed — output files live in run_out_dir which is
+    # either OUTPUT_DIR (legacy /api/extract) or a job-scoped work dir.
 
     summary_dict = data.get("summary", {})
     total_val_str = "0"
@@ -1465,6 +1487,16 @@ async def process_invoice_data(file_path: Path, original_filename: str):
         "analysis_file": analysis_file_name, "analysis_url": f"/api/download/{analysis_file_name}" if analysis_file_name else None,
         "employees": [{col: emp.get(col.lower(), "") for col in active_fields} for emp in data.get("employees", [])],
     }
+
+# ── Sync wrapper used by flow_orchestrator (runs in worker thread) ────────────
+def process_invoice_data_sync(file_path: Path, original_filename: str, out_dir: Path | None = None) -> dict:
+    """
+    Synchronous version of process_invoice_data for use in background threads.
+    The async version is kept for the /api/extract endpoint (event-loop context).
+    """
+    import asyncio
+    return asyncio.run(process_invoice_data(file_path, original_filename, out_dir=out_dir))
+
 
 @app.post("/api/extract")
 async def extract(file: UploadFile = File(...)):
@@ -1491,82 +1523,121 @@ async def extract(file: UploadFile = File(...)):
 
 @app.post("/api/process-flow")
 async def process_flow(files: list[UploadFile] = File(...)):
-    try:
-        print(f"\n[RPVE] Processing Flow with {len(files)} files")
-        import sys
-        if str(BASE_DIR) not in sys.path:
-            sys.path.append(str(BASE_DIR))
-        
-        try:
-            import flow_orchestrator
-        except ImportError as e:
-            raise HTTPException(500, f"Error importing flow orchestrator: {e}")
+    """
+    Async, non-blocking implementation of the full RPVE pipeline.
 
-        pdf_file = None
-        excel_files = []
-        
-        for file in files:
-            if not file.filename: continue
-            ext = Path(file.filename).suffix.lower()
-            
-            unique_id = uuid.uuid4().hex[:8]
-            timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
-            safe_filename = re.sub(r'[\\/:*?\"<>|]', '_', file.filename)
-            filename_unique = f"{unique_id}_{timestamp_str}_{safe_filename}"
-            file_path = UPLOAD_DIR / filename_unique
-            
-            with open(file_path, "wb") as f:
-                shutil.copyfileobj(file.file, f)
-                
-            if ext == ".pdf":
-                pdf_file = file_path
-            elif ext in [".xlsx", ".xls"]:
-                excel_files.append(file_path)
+    Frontend contract is UNCHANGED:
+      - Still accepts the same multipart/form-data payload
+      - Still blocks until the job completes (long-poll style)
+      - Still returns the identical JSON response shape
 
-        if not pdf_file or not excel_files:
-            raise HTTPException(400, "Please upload at least one PDF and one Excel template.")
-            
-        try:
-            ref_census = excel_files[1] if len(excel_files) > 1 else None
-            result = await flow_orchestrator.run_flow(str(pdf_file), str(excel_files[0]), str(ref_census) if ref_census else None)
-            return result
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            if isinstance(e, HTTPException):
-                raise e
-            raise HTTPException(500, str(e))
-    except Exception as e:
-        raise HTTPException(500, str(e))
+    Internally, the job is executed in a background worker thread
+    so the event loop is never blocked during OCR/LLM processing.
+    Multiple simultaneous calls will each run in their own thread.
+    The job_id is purely backend-internal — never sent to the frontend.
+    """
+    import job_store
+    import job_worker
+
+    print(f"\n[RPVE] Processing Flow with {len(files)} files")
+
+    # ── 1. Generate a backend-internal job_id ─────────────────────────────────
+    job_id  = uuid.uuid4().hex
+    job_dir = job_worker.get_job_dir(job_id)
+    input_dir = job_dir / "input"
+
+    # ── 2. Save uploaded files into jobs/{job_id}/input/ ──────────────────────
+    pdf_file    = None
+    excel_files = []
+
+    for file in files:
+        if not file.filename:
+            continue
+        ext = Path(file.filename).suffix.lower()
+        safe_filename   = re.sub(r'[\\/:*?\"<>|]', '_', file.filename)
+        dest_path = input_dir / safe_filename
+        # If same filename sent twice, suffix with a counter to avoid collision
+        if dest_path.exists():
+            dest_path = input_dir / f"{uuid.uuid4().hex[:4]}_{safe_filename}"
+
+        with open(dest_path, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+
+        if ext == ".pdf":
+            pdf_file = dest_path
+        elif ext in [".xlsx", ".xls"]:
+            excel_files.append(dest_path)
+
+    if not pdf_file or not excel_files:
+        raise HTTPException(400, "Please upload at least one PDF and one Excel template.")
+
+    # ── 3. Create job record in DB and enqueue ────────────────────────────────
+    job_store.create_job(job_id)
+    job_worker.enqueue_job(job_id)
+    print(f"[RPVE] Job {job_id[:8]}... enqueued.")
+
+    # ── 4. Long-poll: wait for the job to complete (non-blocking) ─────────────
+    # The event loop is free to serve other requests while we sleep.
+    MAX_WAIT_SECONDS = 600   # 10-minute hard limit per job
+    POLL_INTERVAL    = 1.0   # check every 1 second
+    waited = 0.0
+
+    while waited < MAX_WAIT_SECONDS:
+        await asyncio.sleep(POLL_INTERVAL)
+        waited += POLL_INTERVAL
+
+        meta = job_store.get_job(job_id)
+        if meta is None:
+            raise HTTPException(500, "Job record lost — internal error")
+
+        if meta.status == "completed":
+            # Deserialise the rich result JSON that run_job() stored
+            if meta.result_json:
+                return json.loads(meta.result_json)
+            raise HTTPException(500, "Job completed but result_json is empty")
+
+        if meta.status == "failed":
+            raise HTTPException(500, f"Processing failed: {meta.error or 'unknown error'}")
+
+    # Timeout — mark as failed and return error
+    job_store.update_status(job_id, "failed", error="Timed out after 10 minutes")
+    raise HTTPException(504, "Processing timed out. Please try again.")
 
 
 @app.get("/api/download/{filename}", include_in_schema=False)
 async def download(filename: str):
-    # 1. Try to get from in-memory cache
-    path_str = _cache.get(filename)
-    if path_str:
-        fp = Path(path_str)
-        if fp.exists():
-            mt = ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                  if filename.endswith(".xlsx") else "application/json")
-            return FileResponse(path=fp, filename=filename, media_type=mt)
+    """
+    Serve a generated output file by name.
 
-    # 2. If not in cache (e.g. server restarted), search subdirectories of OUTPUT_DIR
-    # This ensures files are still downloadable even after a reload.
-    matches = list(OUTPUT_DIR.rglob(filename))
-    if matches:
-        fp = matches[0]
-        mt = ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-              if filename.endswith(".xlsx") else "application/json")
+    Search order:
+      1. Per-job work/output directories (jobs/{job_id}/**)
+      2. Legacy OUTPUT_DIR subdirectories (rpve_outputs/**)
+      3. Root of OUTPUT_DIR
+    """
+    def _serve(fp: Path) -> FileResponse:
+        mt = (
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            if filename.endswith(".xlsx")
+            else "application/json"
+        )
         return FileResponse(path=fp, filename=filename, media_type=mt)
 
-    # 3. Fallback to root of OUTPUT_DIR
+    # 1. Search all per-job directories
+    if JOBS_DIR.exists():
+        job_matches = list(JOBS_DIR.rglob(filename))
+        if job_matches:
+            return _serve(job_matches[0])
+
+    # 2. Search legacy OUTPUT_DIR subdirectories
+    output_matches = list(OUTPUT_DIR.rglob(filename))
+    if output_matches:
+        return _serve(output_matches[0])
+
+    # 3. Root of OUTPUT_DIR
     fp = OUTPUT_DIR / filename
     if fp.exists():
-        mt = ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-              if filename.endswith(".xlsx") else "application/json")
-        return FileResponse(path=fp, filename=filename, media_type=mt)
-        
+        return _serve(fp)
+
     raise HTTPException(404, f"File not found: {filename}")
 
 
