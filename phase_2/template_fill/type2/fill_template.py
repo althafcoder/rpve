@@ -192,13 +192,17 @@ class DynamicCensusFiller:
         If Plan Name / Monthly Premium / Discrepancies columns are absent
         they are appended automatically.
         """
+        # Column-level header keywords — require ≥2 to avoid matching title rows like
+        # "Employee Details - 0 records" which only contain one generic word.
+        COLUMN_KW = ('first', 'last', 'plan', 'premium', 'coverage', 'discrep', 'birth', 'gender')
         for r in range(1, 40):
             row_vals = {
                 c: str(ws.cell(row=r, column=c).value or '').strip().lower()
                 for c in range(1, ws.max_column + 1)
             }
             joined = " ".join(row_vals.values())
-            if not any(k in joined for k in ('name', 'employee', 'first')):
+            hit_count = sum(1 for k in COLUMN_KW if k in joined)
+            if hit_count < 2:
                 continue
 
             self.header_row     = r
@@ -256,12 +260,13 @@ class DynamicCensusFiller:
                 self._write_header(ws, r, self.discrepancy_col, 'Discrepancies')
 
             # Column widths for output columns
+            from openpyxl.utils import get_column_letter
             for col_idx, width in [
                 (self.plan_col,         22),
                 (self.premium_col,      18),
                 (self.discrepancy_col,  15),
             ]:
-                letter = ws.cell(row=1, column=col_idx).column_letter
+                letter = get_column_letter(col_idx)
                 ws.column_dimensions[letter].width = width
 
             logger.info(

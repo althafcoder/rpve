@@ -320,10 +320,29 @@ def _parse_row_per_person(df, col_map):
             dep_relation = 'SP' if any(kw in emp_dep_val for kw in ('spouse', 'partner')) else 'CH'
         elif has_coverage:
             cov_tokens = set(re.findall(r'[a-z0-9]+', cov_raw.lower())) if cov_raw else set()
-            is_dependent = any(kw in cov_raw.lower() for kw in DEP_KEYWORDS) and not any(emp in cov_raw.lower() for emp in ('emp', 'employee', 'sub', 'subscriber')) if cov_raw else False
-            is_dependent = is_dependent or (not cov_raw and current_emp is not None)
-            is_employee = (any(tok in EMP_MARKERS for tok in cov_tokens) or (not cov_raw and current_emp is None)) and not is_dependent
-            dep_relation = inferred_rel
+            
+            # Check entire row for explicit dependent keywords
+            row_str = ' '.join(str(v).lower() for v in row.values if pd.notna(v))
+            row_tokens = set(re.findall(r'[a-z0-9]+', row_str))
+            has_explicit_dep = any(tok in DEP_KEYWORDS for tok in row_tokens)
+            
+            if cov_raw:
+                is_dependent = any(kw in cov_raw.lower() for kw in DEP_KEYWORDS) and not any(emp in cov_raw.lower() for emp in ('emp', 'employee', 'sub', 'subscriber'))
+            else:
+                is_dependent = False
+                
+            is_dependent = is_dependent or has_explicit_dep
+            
+            # Fallback for silent dependents: blank coverage, no explicit markers, sitting under an employee.
+            if not is_dependent and not cov_raw and current_emp is not None:
+                # If they have a job title, salary, or full-time status, they are an employee.
+                # Silent dependents usually have very few columns filled (Name, DOB, Gender, Zip).
+                non_null_count = sum(1 for v in row.values if pd.notna(v) and str(v).strip() != '')
+                if non_null_count <= 6:
+                    is_dependent = True
+                    
+            is_employee = not is_dependent
+            dep_relation = inferred_rel or ('sp' in row_tokens and 'SP' or 'CH')
         else:
             # If there are no columns to distinguish employees from dependents, treat every row as an employee
             is_employee = True

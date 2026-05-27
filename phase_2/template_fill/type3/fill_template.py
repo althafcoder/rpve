@@ -252,19 +252,21 @@ def detect_rapt_columns(ws) -> dict:
         # Append Discrepancies column if absent
         if 'disc' not in cols:
             dc   = (cols.get('premium') or ws.max_column) + 1
+            from openpyxl.utils import get_column_letter
             cell = ws.cell(row=r, column=dc)
             cell.value     = 'Discrepancies'
             cell.font      = _HEADER_FONT
             cell.fill      = _HEADER_FILL
             cell.alignment = _CENTER
             cell.border    = _BORDER
-            ws.column_dimensions[cell.column_letter].width = 22
+            ws.column_dimensions[get_column_letter(dc)].width = 22
             cols['disc'] = dc
 
         # Column widths
+        from openpyxl.utils import get_column_letter
         for k, w in [('plan', 32), ('premium', 18), ('first', 15), ('last', 18), ('dob', 14)]:
             if k in cols:
-                ws.column_dimensions[ws.cell(row=1, column=cols[k]).column_letter].width = w
+                ws.column_dimensions[get_column_letter(cols[k])].width = w
 
         logger.info(f"RAPT columns: {cols}")
         return cols

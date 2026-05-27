@@ -252,7 +252,8 @@ class DynamicCensusFiller:
                 hdr_cell.font = Font(name='Arial', bold=True, color='FFFFFF', size=10)
                 hdr_cell.fill = PatternFill('solid', start_color='4472C4')
                 hdr_cell.alignment = Alignment(horizontal='center', vertical='center')
-                letter = hdr_cell.column_letter
+                from openpyxl.utils import get_column_letter
+                letter = get_column_letter(self.discrepancy_column)
                 ws.column_dimensions[letter].width = 30
                 logger.info(f"Appended new Discrepancies column at index {self.discrepancy_column}.")
             logger.info(f"Using census coverage column at index {self.census_coverage_column}.")

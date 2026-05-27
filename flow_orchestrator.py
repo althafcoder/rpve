@@ -69,15 +69,15 @@ def classify_excel_template(excel_path: Path) -> str:
             warnings.simplefilter("ignore")
             df = pd.read_excel(excel_path, nrows=25, header=None)
         all_text = " ".join([str(val).lower() for val in df.values.flatten() if pd.notna(val)])
-
+        
         # Type 1 Detection (Engage/Kaiser)
         if "ee row" in all_text or "relation-ship to employee" in all_text or "kaiser networks" in all_text:
             return "type1"
-
+            
         # Type 3 Detection (RAPT Blue Headers)
-        elif "data row" in all_text or "cobra participant" in all_text or "discrepancies" in all_text:
+        if "data row" in all_text or "cobra participant" in all_text or "discrepancies" in all_text:
             return "type3"
-
+            
         # Type 2 (Basic Titan Intake / Generic Census)
         elif "first name" in all_text or "last name" in all_text or "name" in all_text:
             return "type2"

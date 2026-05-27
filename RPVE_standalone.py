@@ -778,7 +778,7 @@ Names are often printed as "LastName, FirstName" or "LastName, FirstName Middle"
 - middal_name (Middle Name)
 - last_name
 - coverage (e.g. ES / EC / FAM / EE / SP / CH)
-- plan_name (FULL plan/product description — do NOT truncate). IMPORTANT: Plan names often wrap across multiple lines. You MUST concatenate these into a single string (e.g., "Non-Contributory 25K Flat Basic Life EE Only").
+- plan_name (FULL plan/product description — do NOT truncate). IMPORTANT: Plan names often wrap across multiple lines. You MUST concatenate these into a single string (e.g., "Non-Contributory 25K Flat Basic Life EE Only"). CRITICAL: Terms like "SINGLE", "FAMILY", "P&C", "PARENT & CHILD", "H/W" are COVERAGE TIERS, not plan names. NEVER put these in plan_name. If the row only contains a coverage tier, leave plan_name empty or infer it from the document header.
 - plan_type (insurance category: Medical, Dental, Vision, etc.)
 - current_premium: The individual plan line cost for that specific plan row. (**CRITICAL FOR UHC/UHC NA**: Use the "Totals -> Total" column for single-line rows, but use "Charge Amount" if multiple distinct plan rows exist for the same member.)
 - adjustment_amount: Any adjustment amount listed.

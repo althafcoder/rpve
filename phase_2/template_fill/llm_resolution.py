@@ -134,10 +134,10 @@ def run_llm_resolution(
     for r in range(1, 40):
         for c in range(1, min(ws.max_column + 1, 60)):
             val = str(ws.cell(row=r, column=c).value or '').strip().lower()
-            if 'plan' in val:                                plan_col = c
-            if 'premium' in val:                             prem_col = c
-            if 'discrep' in val:                             disc_col = c
-            if 'relation' in val and 'discrep' not in val:   rel_col  = c  # EE/CH/SP column
+            if 'plan' in val and 'premium' not in val and not plan_col: plan_col = c
+            if 'premium' in val and not prem_col:                       prem_col = c
+            if 'discrep' in val and not disc_col:                       disc_col = c
+            if 'relation' in val and 'discrep' not in val and not rel_col: rel_col = c
         if plan_col and prem_col and disc_col:
             break
 

@@ -47,49 +47,139 @@ class SchemaOCRExtractor:
 
     def extract_layout_text(self, save_debug_output=True):
         """
-        Extract the layout-preserved text using rostaing-ocr.
-        It uses deep learning to preserve tables and columns natively.
+        Extract the layout-preserved text using DocTR and a robust overlap line clustering algorithm.
+        It uses deep learning to preserve tables and columns natively, avoiding simple distance-based line merging.
         """
         print(f"\n[Rostaing OCR] Starting structured extraction for: {self.pdf_path.name}")
         
-        if not self.ocr_engine:
-            raise ImportError("rostaing-ocr is not installed or failed to initialize.")
-            
         try:
-            # Most OCR libraries use one of these standard method names
-            if hasattr(self.ocr_engine, 'ocr_extractor'):
+            import fitz
+            from doctr.io import DocumentFile
+            from doctr.models import ocr_predictor
+            import torch
+        except ImportError as e:
+            print(f"[Warning] Missing deep-learning dependencies: {e}. Falling back to standard extraction.")
+            # Simple fallback to standard library if available
+            if self.ocr_engine and hasattr(self.ocr_engine, 'ocr_extractor'):
                 temp_output = self.pdf_path.with_suffix('.rostaing_temp.txt')
                 self.ocr_engine.ocr_extractor(str(self.pdf_path), output_file=str(temp_output))
                 if temp_output.exists():
                     with open(temp_output, 'r', encoding='utf-8') as temp_f:
                         self.output_text = temp_f.read()
-                    temp_output.unlink()  # Clean up temp file
-                else:
-                    self.output_text = ""
-            elif hasattr(self.ocr_engine, 'process_document'):
-                self.output_text = self.ocr_engine.process_document(str(self.pdf_path))
-            elif hasattr(self.ocr_engine, 'extract'):
-                self.output_text = self.ocr_engine.extract(str(self.pdf_path))
-            elif hasattr(self.ocr_engine, 'ocr'):
-                self.output_text = self.ocr_engine.ocr(str(self.pdf_path))
-            else:
-                # Fallback wrapper if it has a non-standard API
-                self.output_text = "Rostaing OCR extraction completed."
-                print("Warning: Could not identify exact extraction method in rostaing_ocr.")
+                    temp_output.unlink()
+                    return self.output_text
+            raise
+
+        try:
+            # 1. Load model (DBNet + CRNN)
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            print(f"[Rostaing OCR] Loading predictor onto device: {device}...", flush=True)
+            model = ocr_predictor(det_arch='db_resnet50', reco_arch='crnn_vgg16_bn', pretrained=True)
+            if torch.cuda.is_available():
+                model.cuda()
+
+            # 2. Render PDF pages to images
+            doc_fitz = fitz.open(self.pdf_path)
+            mat = fitz.Matrix(2, 2)  # High resolution zoom
+            full_text_pages = []
+
+            for page_idx, page in enumerate(doc_fitz):
+                print(f"[Rostaing OCR] Processing Page {page_idx + 1}/{len(doc_fitz)}...", flush=True)
+                pix = page.get_pixmap(matrix=mat, alpha=False)
+                img_bytes = pix.tobytes("png")
                 
+                doc = DocumentFile.from_images(img_bytes)
+                result = model(doc)
+                doctr_page = result.pages[0]
+
+                # Flatten all words from the page blocks
+                all_words = []
+                for block in doctr_page.blocks:
+                    for line in block.lines:
+                        for word in line.words:
+                            xmin, ymin = word.geometry[0]
+                            xmax, ymax = word.geometry[1]
+                            all_words.append({
+                                'text': word.value,
+                                'xmin': float(xmin),
+                                'xmax': float(xmax),
+                                'ymin': float(ymin),
+                                'ymax': float(ymax),
+                                'cy': float((ymin + ymax) / 2),
+                                'height': float(ymax - ymin)
+                            })
+
+                if not all_words:
+                    full_text_pages.append(f"--- Page {page_idx + 1} ---\n")
+                    continue
+
+                # Sort words from Top to Bottom based on ymin
+                all_words.sort(key=lambda w: w['ymin'])
+
+                # Robust vertical overlap clustering algorithm (40% minimum overlap threshold)
+                lines = []
+                for word in all_words:
+                    matched_line = None
+                    for line in lines:
+                        # Find the representative vertical bounds of the line
+                        line_ymin = sum(w['ymin'] for w in line) / len(line)
+                        line_ymax = sum(w['ymax'] for w in line) / len(line)
+                        
+                        overlap = max(0, min(word['ymax'], line_ymax) - max(word['ymin'], line_ymin))
+                        word_h = word['ymax'] - word['ymin']
+                        line_h = line_ymax - line_ymin
+                        
+                        # If vertical overlap is significant (at least 40% of the smaller height)
+                        if overlap > 0.4 * min(word_h, line_h):
+                            matched_line = line
+                            break
+                    
+                    if matched_line is not None:
+                        matched_line.append(word)
+                    else:
+                        lines.append([word])
+
+                # Sort clustered lines in Top-to-Bottom order
+                lines.sort(key=lambda ln: sum(w['ymin'] for w in ln) / len(ln))
+
+                # Reconstruct visual table layout
+                output_lines = []
+                for line in lines:
+                    line.sort(key=lambda w: w['xmin'])
+                    line_text = ""
+                    last_x_end = 0
+                    for word in line:
+                        if last_x_end == 0:
+                            line_text += word['text']
+                        else:
+                            gap = word['xmin'] - last_x_end
+                            if gap > 0.1:
+                                line_text += " \t   " + word['text']
+                            elif gap > 0.02:
+                                line_text += " " + word['text']
+                            else:
+                                line_text += " " + word['text']
+                        last_x_end = word['xmax']
+                    output_lines.append(line_text)
+
+                page_text = "\n".join(output_lines)
+                full_text_pages.append(f"--- Page {page_idx + 1} ---\n{page_text}")
+
+            doc_fitz.close()
+            self.output_text = "\n\n".join(full_text_pages)
             print(f"[Rostaing OCR] Finished extracting. Text length: {len(self.output_text)} characters.")
-            
+
             # Save the raw text to verify the table/column layout was preserved correctly
             if save_debug_output and self.output_text:
                 debug_path = self.pdf_path.with_suffix('.rostaing_layout.txt')
                 with open(debug_path, 'w', encoding='utf-8') as f:
                     f.write(self.output_text)
                 print(f"[Rostaing OCR] Structured layout text saved to: {debug_path}")
-                
+
             return self.output_text
-            
+
         except Exception as e:
-            print(f"[Error] Failed during rostaing-ocr extraction: {e}")
+            print(f"[Error] Failed during custom deep-learning layout extraction: {e}")
             raise
 
     def extract_to_schema(self, schema_format: dict, use_llm=False):
