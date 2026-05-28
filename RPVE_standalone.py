@@ -500,6 +500,10 @@ def assess_text_quality(text: str) -> float:
 
 def extract_text_with_rostaing(pdf_path: Path) -> str:
     """Fallback PDF text extraction using rostaing-ocr when the standard path is noisy."""
+    if pdf_path.suffix.lower() != '.pdf':
+        print(f"[RPVE] Skipping rostaing-ocr fallback: {pdf_path.name} is not a PDF file.")
+        return ""
+
     try:
         from schema_ocr import SchemaOCRExtractor
     except Exception as e:
@@ -778,7 +782,7 @@ Names are often printed as "LastName, FirstName" or "LastName, FirstName Middle"
 - middal_name (Middle Name)
 - last_name
 - coverage (e.g. ES / EC / FAM / EE / SP / CH)
-- plan_name (FULL plan/product description — do NOT truncate). IMPORTANT: Plan names often wrap across multiple lines. You MUST concatenate these into a single string (e.g., "Non-Contributory 25K Flat Basic Life EE Only"). CRITICAL: Terms like "SINGLE", "FAMILY", "P&C", "PARENT & CHILD", "H/W" are COVERAGE TIERS, not plan names. NEVER put these in plan_name. If the row only contains a coverage tier, leave plan_name empty or infer it from the document header.
+- plan_name (FULL plan/product description — do NOT truncate). IMPORTANT: Plan names often wrap across multiple lines. You MUST concatenate these into a single string (e.g., "Non-Contributory 25K Flat Basic Life EE Only"). CRITICAL: Terms like "SINGLE", "FAMILY", "P&C", "PARENT & CHILD", "H/W" are COVERAGE TIERS, not plan names. NEVER put these in plan_name. CRITICAL: Do NOT infer or hallucinate a plan_name from column headers (e.g. if the only column is "Medical", do NOT set plan_name to "Medical"). If no explicit plan name is printed per-row in the document, leave plan_name as null.
 - plan_type (insurance category: Medical, Dental, Vision, etc.)
 - current_premium: The individual plan line cost for that specific plan row. (**CRITICAL FOR UHC/UHC NA**: Use the "Totals -> Total" column for single-line rows, but use "Charge Amount" if multiple distinct plan rows exist for the same member.)
 - adjustment_amount: Any adjustment amount listed.
@@ -1324,11 +1328,9 @@ async def process_invoice_data(file_path: Path, original_filename: str, out_dir:
             ]
             emp["full_name"] = " ".join(p for p in parts if p)
             
-        # ── Global Plan Name Fallback ─────────────────────────────────────────
-        # If the document lacks an explicit plan name and the LLM returns null
-        # (to strictly avoid hallucination), fall back to using the plan type.
-        if not str(emp.get("plan_name") or "").strip() and emp.get("plan_type"):
-            emp["plan_name"] = emp.get("plan_type")
+        # ── Plan Name: NO fallback to plan_type ───────────────────────────────
+        # If the invoice has no explicit plan name column, plan_name stays null.
+        # Do NOT copy plan_type into plan_name — that would be hallucination.
 
     # ── Post-LLM clean-up for Data Link EMI ─────────────────────────────────
     if sub_type == "datalink_emi":

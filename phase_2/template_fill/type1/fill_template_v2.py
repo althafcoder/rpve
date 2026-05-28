@@ -286,7 +286,15 @@ class DynamicCensusFiller:
                     ).strip().lower()
                     if rel_val in ('ch', 'sp', 'child', 'spouse', 'dependent', 'dep'):
                         logger.debug(f"  Skipping dependent row {row_idx}: {first} {last} (relation='{rel_val.upper()}')")
-                        continue   # leave Plan / Premium / Discrepancy blank
+                        
+                        # Explicitly clear out Plan, Premium, and Discrepancy for dependents
+                        # so junk data from the original template doesn't bleed through
+                        ws.cell(row=row_idx, column=self.target_columns['plan']).value = ''
+                        ws.cell(row=row_idx, column=self.target_columns['premium']).value = ''
+                        if self.discrepancy_column:
+                            ws.cell(row=row_idx, column=self.discrepancy_column).value = ''
+                            
+                        continue
 
                 if norm_name in self.source_lookup:
                     data = self.source_lookup[norm_name]

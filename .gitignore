@@ -17,3 +17,5 @@ phase_2/template_fill/type3/reference/
 phase_2/template_fill/type3/__pycache__/
 phase_2/template_fill/__pycache__/
 phase_2/template_fill/venv/
+jobs/
+rpve_jobs.db 

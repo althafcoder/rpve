@@ -245,7 +245,7 @@ def detect_rapt_columns(ws) -> dict:
             elif 'dependent of' in key:                      cols['dep_of']   = c
             elif 'coverage' in key and 'cobra' not in key:  cols['coverage'] = c
             elif 'cobra' in key:                             cols['cobra']    = c
-            elif key == 'plan name':                         cols['plan']     = c
+            elif 'plan' in key:                              cols['plan']     = c
             elif 'monthly' in key and 'premium' in key:     cols['premium']  = c
             elif 'discrepanc' in key:                        cols['disc']     = c
 
@@ -353,7 +353,13 @@ def write_dependent_row(ws, row_idx, data_row_num, dep, emp_row_num, cols):
     _wcell(ws, row_idx, cols.get('zip'),      zip_val,         _CENTER)
     _wcell(ws, row_idx, cols.get('relation'), dep['relation'], _CENTER)
     _wcell(ws, row_idx, cols.get('dep_of'),   emp_row_num,     _CENTER)
-    # Coverage / Cobra / Plan / Premium / Disc intentionally blank for dependents
+    # Explicitly clear out Coverage, Cobra, Plan, Premium, and Disc for dependents
+    # so junk data from the original template doesn't bleed through
+    _wcell(ws, row_idx, cols.get('coverage'), None, _CENTER)
+    _wcell(ws, row_idx, cols.get('cobra'),    None, _CENTER)
+    _wcell(ws, row_idx, cols.get('plan'),     None, _LEFT)
+    _wcell(ws, row_idx, cols.get('premium'),  None, _CENTER)
+    _wcell(ws, row_idx, cols.get('disc'),     None, _CENTER)
 
 
 # ---------------------------------------------------------------------------

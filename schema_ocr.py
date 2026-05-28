@@ -31,6 +31,9 @@ class SchemaOCRExtractor:
         if not self.pdf_path.exists():
             raise FileNotFoundError(f"PDF file not found: {self.pdf_path}")
             
+        if self.pdf_path.suffix.lower() != '.pdf':
+            raise ValueError(f"SchemaOCRExtractor only supports .pdf files. Received: {self.pdf_path.suffix}")
+
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         self.output_text = ""
         

@@ -7,7 +7,7 @@ logger = logging.getLogger(__name__)
 # --- Standardized Mapping Rules ---
 CENSUS_COL_RULES = {
     'insured':   ['insured name', 'insured'],
-    'emp_dep':   ['employee or dependent', 'emp or dep', 'relationship type', 'member type', 'relationship'],
+    'emp_dep':   ['employee or dependent', 'emp or dep', 'relationship type', 'member type', 'relationship', 'relation'],
     # NOTE: 'medical' and 'medical:' intentionally excluded — census columns named "Medical" or
     # "Medical Plan" often contain plan-name strings (e.g. "2026 CDPHP Bronze HDEPO"), not
     # coverage tiers (EE/ES/EC/FAM). Those columns are captured by 'plan_desc' below.
@@ -315,7 +315,7 @@ def _parse_row_per_person(df, col_map):
         if has_emp_dep:
             emp_dep_val = get_val(row, col_map, 'emp_dep').lower().strip()
             tokens = set(re.findall(r'[a-z0-9]+', emp_dep_val))
-            is_dependent = any(tok in DEP_KEYWORDS for tok in tokens) or '0' in tokens
+            is_dependent = any(tok in DEP_KEYWORDS for tok in tokens) or '0' in tokens or any(tok in ('ch', 'sp', 'dep') for tok in tokens)
             is_employee = (any(tok in EMP_MARKERS for tok in tokens) or not emp_dep_val) and not is_dependent
             dep_relation = 'SP' if any(kw in emp_dep_val for kw in ('spouse', 'partner')) else 'CH'
         elif has_coverage:
