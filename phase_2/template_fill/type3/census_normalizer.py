@@ -15,7 +15,7 @@ CENSUS_COL_RULES = {
                   'benefit level', 'tier', 'coverage'],
     'first':     ['first name', 'first', 'given name'],
     'last':      ['last name', 'last', 'surname'],
-    'fullname':  ['full name', 'full_name', 'member name', 'employee name', 'name'],
+    'fullname':  ['full name', 'full_name', 'member name', 'employee name', 'name', 'employees'],
     'gender':    ['gender', 'sex'],
     'dob':       ['date of birth', 'dob', 'birth date', 'birth', 'birthdate'],
     'zip':       ['zip code', 'zip', 'postal code', 'home zip'],

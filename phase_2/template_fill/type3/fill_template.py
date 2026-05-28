@@ -245,8 +245,8 @@ def detect_rapt_columns(ws) -> dict:
             elif 'dependent of' in key:                      cols['dep_of']   = c
             elif 'coverage' in key and 'cobra' not in key:  cols['coverage'] = c
             elif 'cobra' in key:                             cols['cobra']    = c
-            elif 'plan' in key:                              cols['plan']     = c
             elif 'monthly' in key and 'premium' in key:     cols['premium']  = c
+            elif 'plan' in key:                              cols['plan']     = c
             elif 'discrepanc' in key:                        cols['disc']     = c
 
         # Append Discrepancies column if absent

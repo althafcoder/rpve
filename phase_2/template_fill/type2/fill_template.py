@@ -217,8 +217,8 @@ class DynamicCensusFiller:
                 elif 'first'    in v and 'name' in v:   first_col    = c
                 elif 'last'     in v and 'name' in v:   last_col     = c
                 elif 'coverage' in v:                   coverage_col = c
-                elif 'plan'     in v:                   plan_col     = c
                 elif 'premium'  in v:                   premium_col  = c
+                elif 'plan'     in v:                   plan_col     = c
                 elif 'discrep'  in v:                   disc_col     = c
 
             # Determine name mode
