@@ -401,7 +401,7 @@ def extract_text(pdf_path: Path, max_pages: int = 1000) -> str:
                         except Exception as e:
                             print(f"  [PAGE {i+1}] OCR failed: {e}")
 
-                    text += page_text + "\n"
+                    text += f"--- Page {i + 1} ---\n" + page_text + "\n"
     except Exception as e:
         print(f"[RPVE] Global extraction error: {e}")
 
@@ -643,7 +643,6 @@ def clean_invoice_text(text: str) -> str:
         ^\s*page\s+\d+\s+of\s+\d+\s*$|
         copyright\s+©\s+.*adp,\s+inc|
         ^\s*Name\s+Provider\s+Plan\s+Coverage\s+Type\s+Month\s+Cost\s*$|
-        ^\s*---\s*Page\s+\d+\s*---\s*$|
         ^\s*Consolidated\s+Customer\s+No.*$|
         ^\s*Customer\s+No.*Invoice\s+No.*$|
         ^\s*Invoice\s+Date:.*$|
@@ -691,6 +690,21 @@ def split_multi_invoice_text(text: str) -> list[str]:
         end = matches[i+1].start() if i + 1 < len(matches) else len(text)
         parts.append(text[start:end])
     return parts
+
+
+def split_text_by_pages(text: str) -> list[str]:
+    """Splits text using '--- Page \d+ ---' markers."""
+    pattern = re.compile(r'(--- Page \d+ ---)', re.IGNORECASE)
+    matches = list(pattern.finditer(text))
+    if not matches:
+        return [text]
+    
+    pages = []
+    for i in range(len(matches)):
+        start = matches[i].start()
+        end = matches[i+1].start() if i+1 < len(matches) else len(text)
+        pages.append(text[start:end])
+    return pages
 
 
 def extract_with_llm(sub_type: str, text: str, ev_mode: bool = False) -> dict:
@@ -889,27 +903,21 @@ You MUST NEVER treat the alphanumeric prefix as an ignored group/policy code. Yo
 
 PDF TEXT: {text}
 """
-    lines = text.split('\n')
+    # Page-based chunking with OVERLAP to prevent data loss at page boundaries
+    pages = split_text_by_pages(text)
     chunks = []
-    current_chunk = []
-    current_len = 0
-
-    # Use 40,000 char chunks by default (suitable for many files).
-    # If a chunk fails, the recursive _process_chunk will split it dynamically.
-    CHUNK_MAX = 40000
-    OVERLAP   = 4000
-
-    for line in lines:
-        if current_len + len(line) > CHUNK_MAX and current_chunk:
-            chunks.append('\n'.join(current_chunk))
-            # Carry the last OVERLAP chars of this chunk into the next one
-            overlap_text = '\n'.join(current_chunk)[-OVERLAP:]
-            current_chunk = [overlap_text]
-            current_len   = len(overlap_text)
-        current_chunk.append(line)
-        current_len += len(line) + 1
-    if current_chunk:
-        chunks.append('\n'.join(current_chunk))
+    
+    if pages:
+        PAGES_PER_CHUNK = 3  # Process 3 pages at a time
+        
+        # Sliding window with 1-page overlap
+        # Example: [1,2,3], [3,4,5], [5,6,7]...
+        for i in range(0, len(pages), PAGES_PER_CHUNK - 1):
+            chunk_pages = pages[i : i + PAGES_PER_CHUNK]
+            if chunk_pages:
+                chunks.append("\n".join(chunk_pages))
+            if i + PAGES_PER_CHUNK >= len(pages):
+                break
 
     all_employees = []
     final_summary = {}

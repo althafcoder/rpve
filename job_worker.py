@@ -50,17 +50,25 @@ def get_job_dir(job_id: str) -> Path:
 
 
 def _make_job_logger(job_id: str, job_dir: Path) -> logging.Logger:
-    """Create a per-job file logger that writes to jobs/{job_id}/logs/job.log."""
+    """Create a per-job logger that writes to a file AND the console."""
     log_path = job_dir / "logs" / "job.log"
     logger = logging.getLogger(f"rpve.job.{job_id}")
     logger.setLevel(logging.DEBUG)
+    
     # Avoid adding duplicate handlers if the logger already exists
     if not logger.handlers:
+        formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+        
+        # 1. File Handler (saves to job directory)
         fh = logging.FileHandler(str(log_path), encoding="utf-8")
-        fh.setFormatter(
-            logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-        )
+        fh.setFormatter(formatter)
         logger.addHandler(fh)
+        
+        # 2. Console Handler (prints to terminal)
+        sh = logging.StreamHandler()
+        sh.setFormatter(formatter)
+        logger.addHandler(sh)
+        
     return logger
 
 
