@@ -296,6 +296,7 @@ def _find_columns(ws) -> dict[str, int | None]:
             'name': None, 'first': None, 'last': None,
             'plan': None, 'premium': None, 'disc': None,
             'relation': None,   # NEW — Relationship / Relation column (EE / CH / SP)
+            'coverage': None,   # NEW — Coverage / Tier column
         }
         
         for c, v in row_vals.items():
@@ -313,6 +314,8 @@ def _find_columns(ws) -> dict[str, int | None]:
                 current_cols['disc'] = c; score += 3  # High weight for validation column
             elif 'relation' in v and 'discrep' not in v:  # catches 'Relationship', 'Relation', 'Relationship to Employee', etc.
                 current_cols['relation'] = c; score += 1
+            elif 'coverage' in v or 'tier' in v:
+                current_cols['coverage'] = c; score += 1
         
         if score > best_score and (current_cols['first'] or current_cols['name']):
             best_score = score
@@ -388,6 +391,49 @@ def match_name(
         return best_entry, 'possible', best_score
 
     return None, 'none', 0.0
+
+
+# ===========================================================================
+# COVERAGE NORMALISATION
+# ===========================================================================
+
+def canonical_coverage_tier(value) -> str:
+    """
+    Normalize common coverage-tier aliases across census and invoice files.
+    Returns empty string if value is null or represents an empty/NA placeholder.
+    """
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+    
+    # Normalize: lower, strip punctuation, remove spaces, upper
+    raw = str(value).strip().lower()
+    if not raw or raw in ('n/a', 'na', 'none', 'null', 'nan', '-', ''):
+        return ""
+
+    token = re.sub(r"[^a-z0-9]", "", raw).upper()
+
+    tier_map = {
+        "E": "EE", "EE": "EE", "EMPLOYEE": "EE", "EMPLOYER": "EE", "EMPLOYEEONLY": "EE",
+        "S": "ES", "ES": "ES", "SPOUSE": "ES", "SS": "ES", "EMPLOYEESPOUSE": "ES", "EMPLOYEEANDSPOUSE": "ES",
+        "C": "EC", "EC": "EC", "CH": "EC", "CHILD": "EC", "CHILDREN": "EC", "EMPLOYEECHILDREN": "EC", "EMPLOYEEANDCHILDREN": "EC",
+        "F": "FAM", "FAM": "FAM", "FAMILY": "FAM", "EF": "FAM", "EMPLOYEEFAMILY": "FAM",
+    }
+
+    result = tier_map.get(token)
+    if result:
+        return result
+
+    # Keyword fallback for unrecognised long-form strings
+    if 'spouse' in raw and ('child' in raw or 'fam' in raw or '1+' in raw):
+        return "FAM"
+    if 'spouse' in raw or 'partner' in raw:
+        return "ES"
+    if 'child' in raw or '1+' in raw or 'dep' in raw:
+        return "EC"
+    if 'only' in raw or 'employee' in raw:
+        return "EE"
+
+    return token
 
 
 # ===========================================================================
@@ -525,31 +571,25 @@ def run_validation(
 
         stats['total_rows'] += 1
 
-        # ── Rows that need resolution ─────────────────────────────────
         is_not_census  = _NOT_ON_CENSUS.lower()  in disc_val.lower()
         is_not_invoice = _NOT_ON_INVOICE.lower() in disc_val.lower()
+        is_correct     = not (is_not_census or is_not_invoice)
 
-        # ── Already resolved rows — skip ──────────────────────────────
-        if not (is_not_census or is_not_invoice):
-            stats['already_correct'] += 1
-            
-            # Identify the invoice that Phase 2 mapped to this row and claim it
-            match_entry, _, _ = match_name(raw_name, invoice_lookup, threshold)
-            if match_entry:
-                claimed_invoices.add(match_entry['raw_name'])
-                
-            if 'matched' in disc_val.lower():
-                # Fallback: track previously claimed matches if re-running
-                if " -> " in disc_val:
-                    inv_name = disc_val.split(" -> ", 1)[-1].strip()
-                    claimed_invoices.add(inv_name)
-                    
+        if is_not_census:
+            # handle appended row
+            if match_name(raw_name, invoice_lookup, threshold)[0] and match_name(raw_name, invoice_lookup, threshold)[0]['raw_name'] in claimed_invoices:
+                rows_to_delete.append(row_idx)
+                stats['appended_deleted'] += 1
+            else:
+                disc_cell.value      = _NOT_ON_CENSUS
+                disc_cell.fill       = _FILL_RED
+                disc_cell.font       = _FONT
+                disc_cell.alignment  = _CENTER
+                stats['still_unresolved'] += 1
             continue
 
-        # Run name matching
-        match_entry, match_type, confidence = match_name(
-            raw_name, invoice_lookup, threshold
-        )
+        # Run name matching for everything else (Correct or not_on_invoice)
+        match_entry, match_type, confidence = match_name(raw_name, invoice_lookup, threshold)
 
         audit_entry = {
             'row':            row_idx,
@@ -561,53 +601,77 @@ def run_validation(
             'action':         'unresolved'
         }
 
-        if is_not_invoice:
-            # ── Original Census Row needing invoice data ──────────────────
-            if match_type in ('canonical', 'token_swap'):
-                _apply_match(ws, row_idx, match_entry, col_positions,
-                             f"Matched -> {match_entry['raw_name']}"[:40],
-                             _FILL_GREEN)
-                stats['resolved_canonical'] += 1
-                audit_entry['action'] = 'resolved_canonical'
-                claimed_invoices.add(match_entry['raw_name'])
+        # ── Determine Employee & Coverage Status ──────────────────────────
+        emp_status = None
+        matched_suffix = ""
+        if match_type in ('canonical', 'token_swap'):
+            emp_status = "Matched"
+        elif match_type == 'fuzzy' and confidence >= threshold:
+            emp_status = f"Fuzzy Match ({confidence:.0f}%)"
+            matched_suffix = f" -> {match_entry['raw_name']}"
+        elif match_type == 'possible':
+            emp_status = f"Possible Match ({confidence:.0f}%)"
+            matched_suffix = f" -> {match_entry['raw_name']}"
 
-            elif match_type == 'fuzzy' and confidence >= threshold:
-                label = f"Fuzzy Match ({confidence:.0f}%) -> {match_entry['raw_name']}"[:40]
-                _apply_match(ws, row_idx, match_entry, col_positions, label, _FILL_YELLOW)
+        cov_status = "not found on invoice"
+        if match_entry and emp_status:
+            inv_tier = canonical_coverage_tier(match_entry.get('coverage'))
+            cen_tier = canonical_coverage_tier(ws.cell(row=row_idx, column=col_positions['coverage']).value if col_positions.get('coverage') else None)
+            
+            if not cen_tier:
+                cov_status = "not found on census"
+            elif not inv_tier:
+                cov_status = "not found on invoice"
+            elif inv_tier == cen_tier:
+                cov_status = "Matched"
+            else:
+                cov_status = "Mismatched"
+
+        # ── Apply Updates ──────────────────────────────────────────────
+        if emp_status:
+            label = f"Employee Verified: {emp_status}{matched_suffix} | Coverage Verified: {cov_status}"
+            
+            fill = _FILL_RED
+            if "Matched" in emp_status and cov_status == "Matched":
+                fill = _FILL_GREEN
+            elif "Possible" in emp_status:
+                fill = _FILL_ORANGE
+            else:
+                fill = _FILL_YELLOW
+
+            # User hint: if Possible match (lower confidence), don't fill plan/premium
+            fill_data = (match_type != 'possible')
+            
+            _apply_match(ws, row_idx, match_entry, col_positions, label[:100], fill, fill_data=fill_data)
+            
+            if is_correct:
+                stats['already_correct'] += 1
+                audit_entry['action'] = 'updated_correct'
+                claimed_invoices.add(match_entry['raw_name']) # Already matched, keep claimed
+            elif match_type == 'possible':
+                stats['possible_matches'] += 1
+                audit_entry['action'] = 'flagged_possible'
+                # DO NOT add to claimed_invoices. This keeps the appended row at bottom 
+                # so the user doesn't lose data, and Phase 4 (LLM) can try to match it.
+            elif match_type == 'fuzzy':
                 stats['resolved_fuzzy'] += 1
                 audit_entry['action'] = 'resolved_fuzzy'
                 claimed_invoices.add(match_entry['raw_name'])
-
-            elif match_type == 'possible':
-                disc_cell.value      = f"Possible Match ({confidence:.0f}%) -> {match_entry['raw_name']}"[:40]
-                disc_cell.fill       = _FILL_ORANGE
-                disc_cell.font       = _FONT
-                disc_cell.alignment  = _CENTER
-                stats['possible_matches'] += 1
-                audit_entry['action'] = 'flagged_possible'
-
             else:
+                stats['resolved_canonical'] += 1
+                audit_entry['action'] = 'resolved_canonical'
+                claimed_invoices.add(match_entry['raw_name'])
+        else:
+            if is_not_invoice:
+                disc_cell.value     = _NOT_ON_INVOICE
                 disc_cell.fill      = _FILL_RED
                 disc_cell.font      = _FONT
                 disc_cell.alignment = _CENTER
                 stats['still_unresolved'] += 1
                 audit_entry['action'] = 'unresolved'
-
-        elif is_not_census:
-            # ── Appended Invoice Row (Added by Phase 2) ───────────────────
-            if match_entry and match_entry['raw_name'] in claimed_invoices:
-                # We already mapped this invoice record to a proper census row above!
-                rows_to_delete.append(row_idx)
-                stats['appended_deleted'] += 1
-                audit_entry['action'] = 'deleted_duplicate'
-            else:
-                # Truly not on the original census, keeping it as an appended exception.
-                disc_cell.value      = _NOT_ON_CENSUS
-                disc_cell.fill       = _FILL_RED
-                disc_cell.font       = _FONT
-                disc_cell.alignment  = _CENTER
-                stats['still_unresolved'] += 1
-                audit_entry['action'] = 'kept_unresolved_appended'
+            elif is_correct:
+                stats['already_correct'] += 1
+                audit_entry['action'] = 'kept_correct_no_match'
 
         audit_log.append(audit_entry)
 
@@ -668,7 +732,7 @@ def run_validation(
 
 
 def _apply_match(ws, row_idx: int, entry: dict, cols: dict,
-                 label: str, fill: PatternFill) -> None:
+                 label: str, fill: PatternFill, fill_data: bool = True) -> None:
     """Write matched invoice data into the worksheet row and update Discrepancy cell."""
     disc_col = cols.get('disc')
     plan_col = cols.get('plan')
@@ -681,6 +745,9 @@ def _apply_match(ws, row_idx: int, entry: dict, cols: dict,
         cell.fill       = fill
         cell.font       = _FONT
         cell.alignment  = _CENTER
+
+    if not fill_data:
+        return
 
     # Fill plan name if cell is empty
     if plan_col and entry.get('plan'):

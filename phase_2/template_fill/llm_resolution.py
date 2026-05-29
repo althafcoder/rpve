@@ -3,11 +3,14 @@ import sys
 import json
 import argparse
 import logging
+import re
+import pandas as pd
 from pathlib import Path
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font, Alignment
 from openai import OpenAI
 from dotenv import load_dotenv
+import pandas as pd
 
 # Setup Logging
 logging.basicConfig(
@@ -21,6 +24,28 @@ _FONT = Font(name='Arial', size=10)
 _FILL_LLM = PatternFill('solid', start_color='DDEBF7')  # Light blue
 _CENTER = Alignment(horizontal='center', vertical='center')
 _LEFT = Alignment(horizontal='left', vertical='center')
+
+def canonical_coverage_tier(value) -> str:
+    """Normalize common coverage-tier aliases."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+    raw = str(value).strip().lower()
+    if not raw or raw in ('n/a', 'na', 'none', 'null', 'nan', '-', ''):
+        return ""
+    token = re.sub(r"[^a-z0-9]", "", raw).upper()
+    tier_map = {
+        "E": "EE", "EE": "EE", "EMPLOYEE": "EE", "EMPLOYER": "EE", "EMPLOYEEONLY": "EE",
+        "S": "ES", "ES": "ES", "SPOUSE": "ES", "SS": "ES", "EMPLOYEESPOUSE": "ES", "EMPLOYEEANDSPOUSE": "ES",
+        "C": "EC", "EC": "EC", "CH": "EC", "CHILD": "EC", "CHILDREN": "EC", "EMPLOYEECHILDREN": "EC", "EMPLOYEEANDCHILDREN": "EC",
+        "F": "FAM", "FAM": "FAM", "FAMILY": "FAM", "EF": "FAM", "EMPLOYEEFAMILY": "FAM",
+    }
+    result = tier_map.get(token)
+    if result: return result
+    if 'spouse' in raw and ('child' in raw or 'fam' in raw or '1+' in raw): return "FAM"
+    if 'spouse' in raw or 'partner' in raw: return "ES"
+    if 'child' in raw or '1+' in raw or 'dep' in raw: return "EC"
+    if 'only' in raw or 'employee' in raw: return "EE"
+    return token
 
 def run_llm_resolution(
     validated_excel: Path,
@@ -130,7 +155,7 @@ def run_llm_resolution(
     )
 
     # Find columns
-    plan_col, prem_col, disc_col, rel_col = None, None, None, None
+    plan_col, prem_col, disc_col, rel_col, cov_col = None, None, None, None, None
     for r in range(1, 40):
         for c in range(1, min(ws.max_column + 1, 60)):
             val = str(ws.cell(row=r, column=c).value or '').strip().lower()
@@ -138,6 +163,7 @@ def run_llm_resolution(
             if 'premium' in val and not prem_col:                       prem_col = c
             if 'discrep' in val and not disc_col:                       disc_col = c
             if 'relation' in val and 'discrep' not in val and not rel_col: rel_col = c
+            if ('coverage' in val or 'tier' in val) and not cov_col:     cov_col = c
         if plan_col and prem_col and disc_col:
             break
 
@@ -186,12 +212,24 @@ def run_llm_resolution(
                     cell.alignment = _CENTER
                     cell.number_format = '$#,##0.00'
 
+            # ── Determine Coverage Status ────────────────────────────────
+            cov_status = "not found on invoice"
+            inv_tier = canonical_coverage_tier(target_invoice.get('coverage'))
+            cen_tier = canonical_coverage_tier(ws.cell(row=target_row, column=cov_col).value if cov_col else None)
+            
+            if not cen_tier:
+                cov_status = "not found on census"
+            elif not inv_tier:
+                cov_status = "not found on invoice"
+            elif inv_tier == cen_tier:
+                cov_status = "Matched"
+            else:
+                cov_status = "Mismatched"
+
             cell = ws.cell(row=target_row, column=disc_col)
-            cell.value = f"LLM Matched -> {target_invoice['raw_name']}"[:40]
+            cell.value = f"Employee Verified: LLM Matched | Coverage Verified: {cov_status}"
             cell.fill = _FILL_LLM
             cell.font = _FONT
-            cell.alignment = _CENTER
-
             cell.alignment = _CENTER
 
             match_count += 1

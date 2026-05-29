@@ -366,7 +366,7 @@ def _parse_row_per_person(df, col_map):
             if not dep_relation: dep_relation = inferred_rel or 'CH'
             current_emp['dependents'].append({
                 'first': first, 'last': dep_last, 'gender': _gender_code(get_val(row, col_map, 'gender')),
-                'dob': dob, 'relation': dep_relation
+                'dob': dob, 'relation': dep_relation, 'zip': get_val(row, col_map, 'zip') or current_emp.get('zip', '')
             })
     return result
 
@@ -409,7 +409,7 @@ def _parse_grouped(df, col_map):
             data['dependents'].append({
                 'first': d_first, 'last': d_last, 'gender': _gender_code(get_val(dr, col_map, 'gender')),
                 'dob': dr.get(col_map['dob']) if 'dob' in col_map else None,
-                'relation': rel
+                'relation': rel, 'zip': get_val(dr, col_map, 'zip') or data.get('zip', '')
             })
         
         key = f"{first.lower()} {last.lower()}"
