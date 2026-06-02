@@ -215,15 +215,15 @@ class DynamicCensusFiller:
         """Fills the template form dynamically."""
         try:
             wb = load_workbook(template_path)
-            # Find the Census sheet
-            ws = None
-            for s in wb.sheetnames:
-                if 'census' in s.lower():
-                    ws = wb[s]
-                    break
+            # Find the target sheet (look for common keywords or fallback to active)
+            ws = next(
+                (wb[s] for s in wb.sheetnames 
+                 if any(k in s.lower() for k in ("census", "sheet", "employee", "table"))),
+                wb.active
+            )
             
             if not ws:
-                logger.error("Could not find a 'Census' sheet in the template.")
+                logger.error("Could not determine the target sheet in the template.")
                 return False
 
             # Find data start (looking for headers like 'EE Row' or 'First Name')

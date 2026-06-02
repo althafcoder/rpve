@@ -847,10 +847,11 @@ You MUST NEVER treat the alphanumeric prefix as an ignored group/policy code. Yo
 - Example: Medical=$334.78, Dental=$27.90, Vision=$7.70, Total Due=$412.38 → current_premium="$334.78" ✅ NOT "$412.38" ❌
 - **If you return Total Due, Dental, Vision, or Garner HRA in any field, you have failed the task.**
 
-🔹 BLUECROSS BLUE SHIELD (BCBS) SPECIAL RULE (CRITICAL):
+🔹 BLUECROSS BLUE SHIELD (BCBS) / ANTHEM SPECIAL RULES (CRITICAL):
 - **ALWAYS extract the value from the "Total Premium" column as the `current_premium`.**
 - **STRICTLY FORBIDDEN:** Do NOT use the "Employee Medical", "Dependent(s) Medical", or "Total Medical" columns for the premium value on these forms. 
 - You MUST ignore the internal sub-columns and jump to the far-right "Total Premium" column for every member.
+- **PHASE 1 EXCLUSION — "Eligibility Changes" section:** This section (identified by the heading "Eligibility Changes" and rows with a "Change Code" column such as ADDSUB or ADDDEP) represents mid-period enrollment events and is NOT part of the regular billing roster. **You MUST completely ignore every row inside the "Eligibility Changes" section. Do NOT extract any employee records from it.**
 
 🔹 COVERAGE FALLBACK (e.g. BLUECROSS):
 - If the document lacks an explicit 'Coverage' column or it is blank, YOU MUST INFER the coverage tier from the relationship or enrollee type (e.g. 'EE', 'Subscriber' -> EE, 'SP', 'Spouse' -> ES).
@@ -1045,55 +1046,148 @@ PDF TEXT: {text}
 
 def deduplicate_employees(employees: list[dict]) -> list[dict]:
     """
-    Removes duplicate employee records from a list.
+    Removes duplicate employee records from a list using a two-pass strategy.
 
-    This function identifies duplicates based on a combination of the employee's
-    name and their plan name. It prioritizes a full name field but will fall
-    back to combining first and last names. It preserves the first occurrence
-    of each unique record and discards subsequent duplicates.
+    Pass 1 — Exact deduplication:
+        Removes records that are byte-for-byte identical on (full_name, plan_name,
+        premium, adjustment, billing_period). Handles same-record repeated exactly.
+
+    Pass 2 — Anomaly deduplication (new rule):
+        If two records share the same first_name + last_name + current_premium,
+        they are considered the same person extracted twice (e.g. from overlapping
+        page chunks with slightly different plan names or coverage codes).
+        The record with the most populated fields is kept; the other is dropped.
 
     Args:
-        employees: A list of employee data dictionaries, where each dictionary
-                   represents an extracted row from the invoice.
+        employees: A list of employee data dictionaries extracted from an invoice.
 
     Returns:
-        A new list of employee data dictionaries with duplicates removed.
+        A deduplicated list of employee data dictionaries.
     """
     original_count = len(employees)
+
+    # ── PASS 1: Exact key deduplication ───────────────────────────────────────
     seen = set()
-    deduplicated_list = []
+    pass1_list = []
     for employee in employees:
-        # To identify a unique record, we use a combination of the employee's
-        # name and their plan name. The generic extractor returns lowercase keys.
         plan_name = (employee.get("plan_name") or "").strip()
         full_name = (employee.get("full_name") or "").strip()
 
         if not full_name:
             first_name = (employee.get("first_name") or "").strip()
-            last_name = (employee.get("last_name") or "").strip()
+            last_name  = (employee.get("last_name") or "").strip()
             if first_name and last_name:
                 full_name = f"{first_name} {last_name}"
 
-        # We only consider records for deduplication if they have both a name
-        # and a plan. If either is missing, we keep the record to avoid data loss.
+        # If name or plan is missing, keep the record unconditionally
         if not full_name or not plan_name:
-            deduplicated_list.append(employee)
+            pass1_list.append(employee)
             continue
 
-        premium = str(employee.get("current_premium") or "").strip()
-        adjustment = str(employee.get("adjustment_amount") or "").strip()
+        premium        = str(employee.get("current_premium") or "").strip()
+        adjustment     = str(employee.get("adjustment_amount") or "").strip()
         billing_period = str(employee.get("billing_period") or "").strip()
         unique_key = (full_name.upper(), plan_name.upper(), premium, adjustment, billing_period)
         if unique_key not in seen:
             seen.add(unique_key)
-            deduplicated_list.append(employee)
+            pass1_list.append(employee)
 
-    deduplicated_count = len(deduplicated_list)
-    removed_count = original_count - deduplicated_count
-    if removed_count > 0:
-        print(f"[RPVE] Deduplication: {original_count} rows -> {deduplicated_count} rows ({removed_count} duplicates removed)")
+    # ── PASS 2: Name + Premium anomaly deduplication ──────────────────────────
+    # If two records share the same first_name, last_name AND current_premium,
+    # AND their plan names are compatible (same, or one is a substring of the other),
+    # they are considered the same person extracted twice from overlapping page chunks.
+    # Keep the record with the most populated (non-null/non-empty) fields.
+    #
+    # ⚠ Safety guard: if plan names are completely different (e.g. "Medical" vs "Dental")
+    # we do NOT collapse them — they are legitimately distinct plan rows.
 
-    return deduplicated_list
+    def _field_score(emp: dict) -> int:
+        """Score a record by how many fields are non-null/non-empty."""
+        score = sum(1 for v in emp.values() if v is not None and str(v).strip())
+        # Bonus: prefer longer (more complete) plan names
+        score += len(str(emp.get("plan_name") or "")) // 10
+        # Bonus: prefer standard normalized coverage codes
+        std_coverages = {"EE", "ES", "FAM", "EC"}
+        if str(emp.get("coverage") or "").strip().upper() in std_coverages:
+            score += 1
+        return score
+
+    def _plans_compatible(plan_a: str, plan_b: str) -> bool:
+        """Return True if two plan names are the same or one is a substring of the other."""
+        a = plan_a.strip().upper()
+        b = plan_b.strip().upper()
+        if not a or not b:
+            return True   # one is blank — treat as compatible (no conflict)
+        if a == b:
+            return True
+        # Substring match handles wrapped/truncated plan names across page chunks
+        if len(a) > 3 and len(b) > 3:
+            if a in b or b in a:
+                return True
+        return False
+
+    grouped: dict = {}
+    order: list = []
+    for emp in pass1_list:
+        first_name = str(emp.get("first_name") or "").strip().upper()
+        last_name  = str(emp.get("last_name") or "").strip().upper()
+        premium    = str(emp.get("current_premium") or "").strip()
+        plan_name  = str(emp.get("plan_name") or "").strip()
+
+        # Only group if all three key fields are present
+        if not first_name or not last_name or not premium:
+            uid = id(emp)
+            grouped[uid] = [emp]
+            order.append(uid)
+            continue
+
+        # Find an existing group whose plan name is compatible (not a different plan)
+        matched_key = None
+        for existing_key in list(grouped.keys()):
+            if not isinstance(existing_key, tuple):
+                continue
+            if existing_key[:2] != (first_name, last_name) or existing_key[2] != premium:
+                continue
+            # Check plan name compatibility against first record in that group
+            existing_plan = str(grouped[existing_key][0].get("plan_name") or "")
+            if _plans_compatible(plan_name, existing_plan):
+                matched_key = existing_key
+                break
+
+        if matched_key is not None:
+            grouped[matched_key].append(emp)
+        else:
+            # New unique key (different plan or first occurrence)
+            name_premium_key = (first_name, last_name, premium)
+            # Make key unique if same name+premium but different plan (e.g. Medical vs Dental)
+            disambiguated_key = name_premium_key
+            suffix = 0
+            while disambiguated_key in grouped:
+                suffix += 1
+                disambiguated_key = (first_name, last_name, premium, suffix)
+            grouped[disambiguated_key] = [emp]
+            order.append(disambiguated_key)
+
+    final_list = []
+    for key in order:
+        candidates = grouped[key]
+        if len(candidates) == 1:
+            final_list.append(candidates[0])
+        else:
+            # Multiple records with same name + premium + compatible plan → keep the best
+            best = max(candidates, key=_field_score)
+            final_list.append(best)
+            removed = len(candidates) - 1
+            name_label = f"{key[0]} {key[1]}" if isinstance(key, tuple) else str(key)
+            prem_label = key[2] if isinstance(key, tuple) and len(key) >= 3 else '?'
+            print(f"[RPVE] Anomaly dedup: kept best record for '{name_label}' (premium={prem_label}), dropped {removed} weaker duplicate(s)")
+
+    final_count   = len(final_list)
+    total_removed = original_count - final_count
+    if total_removed > 0:
+        print(f"[RPVE] Deduplication: {original_count} rows -> {final_count} rows ({total_removed} total duplicates removed)")
+
+    return final_list
 
 def build_excel(data: dict, sub_type: str, stem: str, active_employee_fields: list[str] | None = None, out_dir: Path | None = None) -> Path:
     from openpyxl import Workbook

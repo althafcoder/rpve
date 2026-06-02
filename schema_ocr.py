@@ -3,6 +3,12 @@
 Structured Schema OCR Extractor
 Uses rostaing-ocr to extract text from PDFs while perfectly preserving layout (tables, columns),
 and provides mapping to a JSON schema using either a text LLM or Regex, avoiding expensive Vision LLMs.
+
+Fallback chain (triggered automatically on any extraction failure):
+  rostaing-ocr  →  DocTR (schema_ocr_fallback.py Level 1)
+                →  pdfplumber (schema_ocr_fallback.py Level 2)
+                →  pdfminer   (schema_ocr_fallback.py Level 3)
+                →  empty string (never crashes)
 """
 
 from pathlib import Path
@@ -18,6 +24,14 @@ try:
 except ImportError:
     ROSTAING_AVAILABLE = False
     print("WARNING: rostaing-ocr is not installed. Please run `pip install rostaing-ocr`")
+
+# DocTR + pdfplumber + pdfminer fallback (schema_ocr_fallback.py)
+try:
+    from schema_ocr_fallback import DoctrOCRFallback
+    DOCTR_FALLBACK_AVAILABLE = True
+except ImportError:
+    DOCTR_FALLBACK_AVAILABLE = False
+    print("WARNING: schema_ocr_fallback.py not found — DocTR fallback will be unavailable.")
 
 load_dotenv()
 
@@ -50,8 +64,15 @@ class SchemaOCRExtractor:
 
     def extract_layout_text(self, save_debug_output=True):
         """
-        Extract the layout-preserved text using DocTR and a robust overlap line clustering algorithm.
-        It uses deep learning to preserve tables and columns natively, avoiding simple distance-based line merging.
+        Extract the layout-preserved text using the following chain:
+
+        Primary:   rostaing-ocr  (DocTR deep-learning, 40% overlap line clustering)
+        Fallback:  DoctrOCRFallback (schema_ocr_fallback.py)
+                   Level 1 — DocTR standalone
+                   Level 2 — pdfplumber
+                   Level 3 — pdfminer
+
+        Any exception in the primary path automatically triggers the fallback.
         """
         print(f"\n[Rostaing OCR] Starting structured extraction for: {self.pdf_path.name}")
         
@@ -183,6 +204,31 @@ class SchemaOCRExtractor:
 
         except Exception as e:
             print(f"[Error] Failed during custom deep-learning layout extraction: {e}")
+
+            # ── Automatic fallback via schema_ocr_fallback.py ───────────────
+            if DOCTR_FALLBACK_AVAILABLE:
+                print("[Rostaing OCR] Engaging DoctrOCRFallback chain (DocTR → pdfplumber → pdfminer)...")
+                try:
+                    fallback_text = DoctrOCRFallback(str(self.pdf_path)).extract()
+                    if fallback_text.strip():
+                        self.output_text = fallback_text
+                        print(f"[Rostaing OCR] Fallback succeeded — {len(fallback_text)} characters extracted.")
+
+                        # Optionally save the fallback result for debugging
+                        if save_debug_output:
+                            debug_path = self.pdf_path.with_suffix('.fallback_layout.txt')
+                            with open(debug_path, 'w', encoding='utf-8') as f:
+                                f.write(fallback_text)
+                            print(f"[Rostaing OCR] Fallback text saved to: {debug_path}")
+
+                        return self.output_text
+                    else:
+                        print("[Rostaing OCR] Fallback returned empty text. Giving up.")
+                except Exception as fb_err:
+                    print(f"[Rostaing OCR] Fallback itself failed: {fb_err}")
+            else:
+                print("[Rostaing OCR] schema_ocr_fallback.py not available — cannot fall back.")
+
             raise
 
     def extract_to_schema(self, schema_format: dict, use_llm=False):
