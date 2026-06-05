@@ -122,21 +122,29 @@ def _execute_job(job_id: str) -> None:
         pdf_files  = list(input_dir.glob("*.pdf"))
         xlsx_files = sorted(input_dir.glob("*.xlsx")) + sorted(input_dir.glob("*.xls"))
 
-        if not pdf_files:
-            raise ValueError("No PDF file found in job input directory")
-        if not xlsx_files:
-            raise ValueError("No Excel template found in job input directory")
-
-        pdf_path       = pdf_files[0]
-        template_path  = str(xlsx_files[0])
-        ref_census     = str(xlsx_files[1]) if len(xlsx_files) > 1 else None
-
-        logger.info(
-            "Inputs — PDF: %s | Template: %s | Ref: %s",
-            pdf_path.name,
-            Path(template_path).name,
-            Path(ref_census).name if ref_census else "None",
-        )
+        if pdf_files:
+            pdf_path       = pdf_files[0]
+            template_path  = str(xlsx_files[0])
+            ref_census     = str(xlsx_files[1]) if len(xlsx_files) > 1 else None
+            logger.info(
+                "Inputs — PDF: %s | Template: %s | Ref: %s",
+                pdf_path.name,
+                Path(template_path).name,
+                Path(ref_census).name if ref_census else "None",
+            )
+        elif len(xlsx_files) >= 2:
+            # Direct Excel Flow: first excel is the "invoice"
+            pdf_path       = xlsx_files[0]
+            template_path  = str(xlsx_files[1])
+            ref_census     = str(xlsx_files[2]) if len(xlsx_files) > 2 else None
+            logger.info(
+                "Inputs — Direct Excel Source: %s | Template: %s | Ref: %s",
+                pdf_path.name,
+                Path(template_path).name,
+                Path(ref_census).name if ref_census else "None",
+            )
+        else:
+            raise ValueError("Insufficient files provided. Need a PDF and an Excel, or at least two Excel files.")
 
         # Run the synchronous pipeline.
         # flow_orchestrator.run_job() writes status transitions via the callback.

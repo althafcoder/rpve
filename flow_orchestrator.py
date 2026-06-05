@@ -127,21 +127,43 @@ def run_job(
 
     logger.info("--- Starting End-to-End RPVE Flow (job_id=%s) ---", job_id)
 
-    # ── PHASE 1: PDF Extraction ──────────────────────────────────────────────
-    status_callback("phase1")
-    logger.info("[1] Running Phase 1 (Extraction) on: %s", pdf_path.name)
-    try:
-        result_data = process_invoice_data_sync(pdf_path, pdf_path.name, out_dir=work_dir)
-        phase1_output_excel = result_data["excel_path"]
-        logger.info("    -> Phase 1 Success! Extracted: %s", Path(phase1_output_excel).name)
+    # ── PHASE 1: Extraction (or Bypass if Excel provided) ─────────────────────
+    is_direct_excel = pdf_path.suffix.lower() in ['.xlsx', '.xls']
 
+    if is_direct_excel:
+        logger.info("[1] Skipping Phase 1 - Direct Excel input detected: %s", pdf_path.name)
+        
+        # If it's an old .xls, we must convert it first
+        if pdf_path.suffix.lower() == '.xls':
+            converted_path = ensure_xlsx(str(pdf_path))
+            phase1_output_excel = converted_path
+        else:
+            phase1_output_excel = str(pdf_path)
+            
+        # Mock result data for subsequent phases
+        result_data = {
+            "excel_path": phase1_output_excel,
+            "json_path":  None,
+            "text_path":  None,
+        }
         phase2_report_path    = work_dir / f"FINAL_AUDIT_REPORT_{job_id}.xlsx"
         validated_report_path = work_dir / f"VALIDATED_AUDIT_REPORT_{job_id}.xlsx"
+        status_callback("classifying") # Skip Phase 1 callback
+    else:
+        status_callback("phase1")
+        logger.info("[1] Running Phase 1 (Extraction) on: %s", pdf_path.name)
+        try:
+            result_data = process_invoice_data_sync(pdf_path, pdf_path.name, out_dir=work_dir)
+            phase1_output_excel = result_data["excel_path"]
+            logger.info("    -> Phase 1 Success! Extracted: %s", Path(phase1_output_excel).name)
 
-    except Exception as e:
-        import traceback
-        logger.error("    -> Phase 1 Failed: %s\n%s", e, traceback.format_exc())
-        raise
+            phase2_report_path    = work_dir / f"FINAL_AUDIT_REPORT_{job_id}.xlsx"
+            validated_report_path = work_dir / f"VALIDATED_AUDIT_REPORT_{job_id}.xlsx"
+
+        except Exception as e:
+            import traceback
+            logger.error("    -> Phase 1 Failed: %s\n%s", e, traceback.format_exc())
+            raise
 
     # ── PHASE 1.5: Pre-process Templates (.xls -> .xlsx) ────────────────────
     template_path   = ensure_xlsx(template_path)
@@ -318,11 +340,21 @@ def run_job(
     final_report_name     = final_report_path.name
     phase2_report_name    = phase2_report_path.name
     validated_report_name = validated_report_path.name
-
-    merged_result["output_file"]       = final_report_name
-    merged_result["excel_file"]        = final_report_name
-    merged_result["excel_url"]         = f"/api/download/{final_report_name}"
+    
+    # Ensure mandatory fields for UI
+    merged_result["status"]      = "success"
+    merged_result["type"]        = "INVOICE"
+    merged_result["sub_type"]    = "standard"
+    merged_result["output_file"] = final_report_name
+    merged_result["excel_file"]  = final_report_name
+    merged_result["excel_url"]   = f"/api/download/{final_report_name}"
     merged_result["final_report_path"] = str(final_report_path.absolute())
+
+    # Use the audit JSON as the primary source for the UI table view
+    if audit_json.exists():
+        merged_result["output_json"] = audit_json.name
+        merged_result["json_file"]   = audit_json.name
+        merged_result["json_url"]    = f"/api/download/{audit_json.name}"
 
     merged_result["phase1_invoice_excel"]         = Path(phase1_output_excel).name
     merged_result["phase1_invoice_excel_url"]     = f"/api/download/{Path(phase1_output_excel).name}"

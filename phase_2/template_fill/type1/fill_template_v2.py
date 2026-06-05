@@ -116,9 +116,8 @@ class DynamicCensusFiller:
             logger.info(f"Loaded source sheet '{sheet_name}' with {len(df)} rows.")
             
             cols = self.find_source_columns(df)
-            
+
             for _, row in df.iterrows():
-                # Get name
                 name_key = ""
                 if cols['full'] and pd.notna(row[cols['full']]):
                     name_key = self.normalize_name(row[cols['full']])
@@ -126,16 +125,26 @@ class DynamicCensusFiller:
                     name_key = self.normalize_name(f"{row[cols['first']]} {row[cols['last']]}")
                 
                 if not name_key: continue
+                
+                # If we already have a medical plan for this person, skip additional rows
+                if name_key in self.source_lookup:
+                    continue
 
                 # Get plan and premium
                 plan = row[cols['plan']] if cols['plan'] else None
-                premium = row[cols['premium']] if cols['premium'] else None
+                premium = row[cols['premium']] if cols['premium'] else 0.0
                 
                 # Clean premium
                 if isinstance(premium, str):
                     premium = re.sub(r'[^\d.]', '', premium)
                     try: premium = float(premium)
-                    except: pass
+                    except: premium = 0.0
+                elif pd.isna(premium):
+                    premium = 0.0
+
+                # Strict per-row $250 filter (Medical selection rule)
+                if premium < 250:
+                    continue
                 
                 raw_full_name = ""
                 if cols['full'] and pd.notna(row[cols['full']]):
@@ -146,36 +155,16 @@ class DynamicCensusFiller:
                 if not self.is_valid_employee_name(raw_full_name):
                     continue
 
-                # Helper to determine plan priority score
-                def get_plan_priority(p_str):
-                    if not p_str: return 0
-                    p_lower = str(p_str).lower()
-                    ancillary = ['vision', 'dental', 'life', 'ad&d', 'ltd', 'std', 'disability', 'voluntary', 'basic']
-                    if any(kw in p_lower for kw in ancillary):
-                        return 1
-                    return 2 # Primary Medical plan
-
                 cov = row[cols['coverage']] if cols['coverage'] else None
 
-                if name_key in self.source_lookup:
-                    existing = self.source_lookup[name_key]
-                    # Update plan only if new plan has higher priority (e.g. Medical > Vision)
-                    if get_plan_priority(plan) > get_plan_priority(existing['plan']):
-                        existing['plan'] = plan
-                        existing['raw_name'] = raw_full_name
-                        if cov: existing['coverage'] = cov
-                    # Keep the maximum premium (cumulative total)
-                    cur_prem = existing['premium'] if existing['premium'] is not None else 0
-                    new_prem = premium if premium is not None else 0
-                    existing['premium'] = max(cur_prem, new_prem)
-                else:
-                    self.source_lookup[name_key] = {
-                        'plan': plan,
-                        'premium': premium,
-                        'raw_name': raw_full_name,
-                        'coverage': cov
-                    }
+                self.source_lookup[name_key] = {
+                    'plan': plan,
+                    'premium': premium,
+                    'raw_name': raw_full_name,
+                    'coverage': cov
+                }
             
+            logger.info(f"Source lookup built: {len(self.source_lookup)} entries (filtered for premium >= $250).")
             return True
         except Exception as e:
             logger.error(f"Failed to load source: {e}")

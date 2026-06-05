@@ -35,11 +35,14 @@ import json
 import logging
 import re
 import sys
+import os
 from pathlib import Path
 
 import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment
+from openai import OpenAI
+from dotenv import load_dotenv
 
 # ---------------------------------------------------------------------------
 # Optional fuzzy library — falls back to SequenceMatcher if not installed
@@ -177,6 +180,58 @@ def lookup_keys(raw) -> list[str]:
 # INVOICE LOADER — reads Phase 1 extraction Excel
 # ===========================================================================
 
+def _detect_invoice_columns_llm(df: pd.DataFrame) -> dict:
+    """Uses LLM to dynamically map unpredictable invoice column headers."""
+    load_dotenv()
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        logger.warning("OPENAI_API_KEY missing. Skipping LLM invoice column detection.")
+        return {}
+
+    client = OpenAI(api_key=api_key)
+    headers = list(df.columns)
+    sample_data = df.head(3).to_dict(orient='records')
+    
+    system_prompt = (
+        "You are a highly accurate data mapping expert. Your task is to map extracted invoice column headers "
+        "to our standard internal fields. Use the provided sample data to understand the content of each column.\n\n"
+        "Standard Fields:\n"
+        "- full_name: The employee or subscriber's full name (or last name if split).\n"
+        "- first_name: First name (if separate).\n"
+        "- last_name: Last name (if separate).\n"
+        "- coverage: Coverage tier or level (e.g., EE, ES, FAM, EC).\n"
+        "- plan_name: The name of the medical or dental plan being billed.\n"
+        "- premium: The current billed premium amount (usually a dollar value).\n\n"
+        "CRITICAL RULES:\n"
+        "1. Return ONLY a valid JSON object mapping our Standard Fields to the EXACT column headers from the file.\n"
+        "2. Do NOT guess blindly. If a field truly does not exist in the file, omit it from the JSON.\n"
+        "3. If names are split across columns (e.g. 'NAME' and 'Unnamed: 1'), map 'NAME' to 'full_name' or 'last_name' and 'Unnamed: 1' to 'first_name'."
+    )
+    
+    user_prompt = (
+        f"Column Headers:\n{headers}\n\n"
+        f"Sample Data (First 3 rows):\n{json.dumps(sample_data, indent=2, default=str)}"
+    )
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.0
+        )
+        mapping = json.loads(response.choices[0].message.content)
+        valid_mapping = {k: v for k, v in mapping.items() if v in headers}
+        logger.info(f"LLM Dynamic Invoice Mapping (Validation): {valid_mapping}")
+        return valid_mapping
+    except Exception as e:
+        logger.error(f"LLM invoice column detection failed: {e}")
+        return {}
+
+
 def load_invoice_data(invoice_path: str | Path) -> dict[str, dict]:
     """
     Load Phase 1 extraction Excel. Returns dict keyed by ALL candidate
@@ -202,29 +257,38 @@ def load_invoice_data(invoice_path: str | Path) -> dict[str, dict]:
     hrow = 0
     for i, row in probe.iterrows():
         row_str = " ".join(str(v).lower() for v in row if pd.notna(v))
-        if any(kw in row_str for kw in ('name', 'plan', 'premium', 'coverage')):
+        if any(kw in row_str for kw in ('name', 'plan', 'premium', 'coverage', 'total cost')):
             hrow = i
             break
 
     df = pd.read_excel(str(path), sheet_name=sheet, skiprows=hrow)
     df.columns = [str(c).strip() for c in df.columns]
 
-    # Column detection (case-insensitive)
+    # Try LLM Mapping
+    col_map_llm = _detect_invoice_columns_llm(df)
+    
+    # Static detection (fallback/supplement)
     col_map: dict[str, str | None] = {
-        'full': None, 'first': None, 'last': None,
-        'plan': None, 'premium': None, 'coverage': None,
+        'full': col_map_llm.get('full_name'),
+        'first': col_map_llm.get('first_name'),
+        'last': col_map_llm.get('last_name'),
+        'plan': col_map_llm.get('plan_name'),
+        'premium': col_map_llm.get('premium'),
+        'coverage': col_map_llm.get('coverage'),
     }
+    
+    # Fill in gaps with static rules
     for col in df.columns:
         cl = col.lower()
-        if 'full' in cl and 'name' in cl:                  col_map['full']     = col
-        elif 'employee' in cl and 'name' in cl:             col_map['full']     = col
-        elif ('first' in cl or 'fname' in cl) and 'name' in cl: col_map['first']    = col
-        elif ('last' in cl or 'lname' in cl) and 'name' in cl:  col_map['last']     = col
-        elif 'plan' in cl and ('name' in cl or 'desc' in cl): col_map['plan']   = col
-        elif 'premium' in cl or 'current' in cl:            col_map['premium']  = col
-        elif 'coverage' in cl or 'tier' in cl:              col_map['coverage'] = col
+        if not col_map['full'] and ('full' in cl and 'name' in cl): col_map['full'] = col
+        if not col_map['full'] and ('employee' in cl and 'name' in cl): col_map['full'] = col
+        if not col_map['first'] and (('first' in cl or 'fname' in cl) and 'name' in cl): col_map['first'] = col
+        if not col_map['last'] and (('last' in cl or 'lname' in cl) and 'name' in cl): col_map['last'] = col
+        if not col_map['plan'] and ('plan' in cl and ('name' in cl or 'desc' in cl)): col_map['plan'] = col
+        if not col_map['premium'] and ('premium' in cl or 'current' in cl or 'total cost' in cl): col_map['premium'] = col
+        if not col_map['coverage'] and ('coverage' in cl or 'tier' in cl): col_map['coverage'] = col
 
-    # Fallback: treat column 0 as full name
+    # Ultimate fallback: treat column 0 as full name
     if not col_map['full'] and not col_map['first']:
         col_map['full'] = df.columns[0]
 
@@ -232,25 +296,43 @@ def load_invoice_data(invoice_path: str | Path) -> dict[str, dict]:
     blocked = ('total', 'subtotal', 'grand total', 'summary', 'record')
 
     for _, row in df.iterrows():
-        # Build raw name
-        if col_map['full'] and pd.notna(row.get(col_map['full'], None)):
-            raw_name = str(row[col_map['full']]).strip()
-        elif col_map['first'] and col_map['last']:
-            f = str(row.get(col_map['first'], '') or '').strip()
-            l = str(row.get(col_map['last'],  '') or '').strip()
-            raw_name = f"{f} {l}".strip()
-        else:
-            continue
+        # Build raw name intelligently from all available components
+        name_parts = []
+        if col_map['first'] and pd.notna(row.get(col_map['first'])):
+            name_parts.append(str(row[col_map['first']]).strip())
+        if col_map['last'] and pd.notna(row.get(col_map['last'])):
+            name_parts.append(str(row[col_map['last']]).strip())
+        if col_map['full'] and pd.notna(row.get(col_map['full'])):
+            val = str(row[col_map['full']]).strip()
+            if val not in name_parts:
+                name_parts.append(val)
+        
+        raw_name = " ".join(name_parts).strip()
 
         if not raw_name or any(b in raw_name.lower() for b in blocked):
             continue
 
         # Clean premium
-        prem_raw = row.get(col_map['premium']) if col_map['premium'] else None
+        prem_raw = row.get(col_map['premium']) if col_map['premium'] else 0.0
         if isinstance(prem_raw, str):
             prem_raw = re.sub(r'[^\d.]', '', prem_raw)
             try:    prem_raw = float(prem_raw)
-            except: prem_raw = None
+            except: prem_raw = 0.0
+        elif pd.isna(prem_raw):
+            prem_raw = 0.0
+
+        # Strict per-row $250 filter (Medical selection rule)
+        if prem_raw < 250:
+            continue
+
+        # If we already have a medical row for this person, skip
+        has_existing = False
+        for key in lookup_keys(raw_name):
+            if key in lookup:
+                has_existing = True
+                break
+        if has_existing:
+            continue
 
         entry = {
             'raw_name': raw_name,
@@ -260,13 +342,13 @@ def load_invoice_data(invoice_path: str | Path) -> dict[str, dict]:
             'tokens':   set(_tokens(raw_name)) # Store for Pass 2.5
         }
 
-        # Register under every candidate key
+        # Store under all lookup keys
         for key in lookup_keys(raw_name):
             if key:
                 lookup[key] = entry
 
     unique = len({v['raw_name'] for v in lookup.values()})
-    logger.info(f"Invoice lookup built: {unique} unique employees from '{sheet}'")
+    logger.info(f"Invoice lookup built: {unique} unique employees (filtered for premium >= $250)")
     return lookup
 
 

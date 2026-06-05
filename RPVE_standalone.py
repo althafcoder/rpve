@@ -1672,8 +1672,13 @@ async def process_flow(files: list[UploadFile] = File(...)):
         elif ext in [".xlsx", ".xls"]:
             excel_files.append(dest_path)
 
-    if not pdf_file or not excel_files:
-        raise HTTPException(400, "Please upload at least one PDF and one Excel template.")
+    # Must have at least one Excel file (the template)
+    if not excel_files:
+        raise HTTPException(400, "Please upload at least one Excel template.")
+
+    # Must have a source (either a PDF invoice or a second Excel file)
+    if not pdf_file and len(excel_files) < 2:
+        raise HTTPException(400, "Please upload either a PDF and an Excel, or at least two Excel files (Source + Template).")
 
     # ── 3. Create job record in DB and enqueue ────────────────────────────────
     job_store.create_job(job_id)

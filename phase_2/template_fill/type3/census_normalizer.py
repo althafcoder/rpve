@@ -1,6 +1,10 @@
 import pandas as pd
 import re
 import logging
+import os
+import json
+from openai import OpenAI
+from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +31,7 @@ CENSUS_COL_RULES = {
 
 EMP_MARKERS = {
     'e', 'ee', 's', 'c', 'f', 'ec', 'es', 'ef', 'fam', 'nc', 'w', 'ne', 'ch', 
-    'employee', 'subscriber', 'primary', 'insured', 'member', 'family',
+    'employee', 'subscriber', 'primary', 'insured', 'member', 'family', 'owner',
     'employeefamily', 'employeeonly', 'employeechild', 'employeechildren', 'employeespouse',
     'employeeandspecial', 'employeeandchildren', 'employeeandspouse'
 }
@@ -42,13 +46,13 @@ _HEADER_SIGNALS = (
 
 def _is_valid_row(first, last, fullname):
     """Filters out summary or empty rows."""
-    text = f"{first} {last} {fullname}".lower()
-    if not text.strip(): return False
+    text = f"{first} {last} {fullname}".lower().strip()
+    if not text or text == 'nat': return False
     blocked = ('total', 'summary', 'record', 'employee details', 'report', 'census')
     return not any(b in text for b in blocked)
 
 def normalize_coverage_code(val):
-    if not val or (isinstance(val, float) and pd.isna(val)): return ""
+    if not val or (isinstance(val, (float, pd.Timestamp)) and pd.isna(val)): return ""
     t = re.sub(r'[\s+()\-]', '', str(val).upper())
     MAP = {
         'E': 'EE', 'S': 'ES', 'C': 'EC', 'F': 'FAM',
@@ -59,7 +63,69 @@ def normalize_coverage_code(val):
     }
     return MAP.get(t, str(val).strip())
 
-def detect_census_columns(df: pd.DataFrame) -> dict:
+def _detect_census_columns_llm(df: pd.DataFrame) -> dict:
+    """Uses LLM to dynamically map unpredictable column headers to standard fields."""
+    load_dotenv()
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        logger.warning("OPENAI_API_KEY missing. Skipping LLM column detection.")
+        return {}
+
+    client = OpenAI(api_key=api_key)
+    
+    # Extract headers and 3 rows of sample data for context
+    headers = list(df.columns)
+    sample_data = df.head(3).to_dict(orient='records')
+    
+    system_prompt = (
+        "You are a highly accurate data mapping expert. Your task is to map client census column headers "
+        "to our standard internal fields. ACCURACY IS CRITICAL. A missed column results in lost data.\n\n"
+        "Use the provided sample data to deduce the true meaning of ambiguously named columns.\n\n"
+        "Standard Fields:\n"
+        "- insured: Name of the primary employee/subscriber.\n"
+        "- emp_dep: Relationship or member type (e.g., Employee, Spouse, Child, Member Type, Status).\n"
+        "- coverage: Coverage tier or election (e.g., EE, ES, FAM, Base, Core).\n"
+        "- first: First name.\n"
+        "- last: Last name.\n"
+        "- fullname: Full name (if first and last are combined).\n"
+        "- gender: Gender or Sex.\n"
+        "- dob: Date of Birth.\n"
+        "- zip: Zip/Postal Code.\n"
+        "- dep_rel: Specific dependent relationship (if separate from emp_dep).\n"
+        "- plan_desc: Detailed medical plan description or election category.\n\n"
+        "CRITICAL RULES:\n"
+        "1. Return ONLY a valid JSON object mapping our Standard Fields to the EXACT column headers from the file.\n"
+        "2. Do NOT guess blindly. If a field truly does not exist in the file, omit it from the JSON.\n"
+        "3. IGNORE columns for Emergency Contacts, Beneficiaries, or Payroll ID info."
+    )
+    
+    user_prompt = (
+        f"Column Headers:\n{headers}\n\n"
+        f"Sample Data (First 3 rows):\n{json.dumps(sample_data, indent=2, default=str)}"
+    )
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.0
+        )
+        content = response.choices[0].message.content
+        mapping = json.loads(content)
+        
+        # Validate that mapped columns actually exist in the dataframe
+        valid_mapping = {k: v for k, v in mapping.items() if v in headers}
+        logger.info(f"LLM Dynamic Mapping: {valid_mapping}")
+        return valid_mapping
+    except Exception as e:
+        logger.error(f"LLM column detection failed: {e}")
+        return {}
+
+def _detect_census_columns_static(df: pd.DataFrame) -> dict:
     col_map = {}
     cols = list(df.columns)
     
@@ -76,8 +142,11 @@ def detect_census_columns(df: pd.DataFrame) -> dict:
             for kw in keywords:
                 if kw in cl:
                     score = len(kw)
-                    # Penalize dependent DOB columns so employee DOB wins for the 'dob' field
-                    if field == 'dob' and any(dep in cl for dep in ['spouse', 'child', 'dep', 'relative']):
+                    # Penalize dependent/emergency columns so primary employee columns win
+                    if any(bad in cl for bad in ['emergency', 'contact', 'beneficiary', 'relative']):
+                        score -= 20
+                    
+                    if field == 'dob' and any(dep in cl for dep in ['spouse', 'child', 'dep']):
                         score -= 15
                     
                     candidate_field = field
@@ -123,11 +192,33 @@ def detect_census_columns(df: pd.DataFrame) -> dict:
 
     return col_map
 
+def detect_census_columns(df: pd.DataFrame) -> dict:
+    """Hybrid detection: Try LLM first, fallback to static keywords."""
+    # 1. Try LLM detection
+    llm_map = _detect_census_columns_llm(df)
+    
+    # 2. Use static detection as fallback/supplement
+    static_map = _detect_census_columns_static(df)
+    
+    # Merge: Prioritize LLM, fill missing with static
+    final_map = llm_map.copy()
+    for field, col in static_map.items():
+        if field not in final_map:
+            final_map[field] = col
+            
+    # Specialized index-based logic for 'first_name_extra' (ADP forms)
+    # always comes from static detection logic
+    if 'first_name_extra' in static_map:
+        final_map['first_name_extra'] = static_map['first_name_extra']
+            
+    logger.info(f"Final Combined Column Mapping: {final_map}")
+    return final_map
+
 def get_val(row, col_map, field, default=''):
     col = col_map.get(field)
     if not col: return default
     v = row.get(col, default)
-    if v is None or (isinstance(v, float) and pd.isna(v)): return default
+    if v is None or pd.isna(v): return default
     return str(v).strip()
 
 def normalize_census_to_list(path):
@@ -315,9 +406,24 @@ def _parse_row_per_person(df, col_map):
         if has_emp_dep:
             emp_dep_val = get_val(row, col_map, 'emp_dep').lower().strip()
             tokens = set(re.findall(r'[a-z0-9]+', emp_dep_val))
+            
+            # High-precedence employee check
+            is_explicit_ee = any(tok in EMP_MARKERS for tok in tokens)
+            
             is_dependent = any(tok in DEP_KEYWORDS for tok in tokens) or '0' in tokens or any(tok in ('ch', 'sp', 'dep') for tok in tokens)
-            is_employee = (any(tok in EMP_MARKERS for tok in tokens) or not emp_dep_val) and not is_dependent
+            
+            # If explicit employee marker found (e.g. "Owner/Partner"), don't let "Partner" trigger dependency
+            if is_explicit_ee:
+                is_dependent = False
+                is_employee = True
+            else:
+                is_employee = (not emp_dep_val) and not is_dependent
+            
             dep_relation = 'SP' if any(kw in emp_dep_val for kw in ('spouse', 'partner')) else 'CH'
+            
+            # Safety net: if not clearly a dependent, assume employee for any valid row
+            if not is_employee and not is_dependent:
+                is_employee = True
         elif has_coverage:
             cov_tokens = set(re.findall(r'[a-z0-9]+', cov_raw.lower())) if cov_raw else set()
             
@@ -352,7 +458,7 @@ def _parse_row_per_person(df, col_map):
 
         if is_employee and not is_dependent:
             coverage = normalize_coverage_code(cov_raw) if cov_raw else 'EE'
-            current_emp = {
+            new_emp = {
                 'first': first, 'last': last, 'gender': _gender_code(get_val(row, col_map, 'gender')),
                 'dob': dob, 'zip': get_val(row, col_map, 'zip'), 'coverage': coverage,
                 'plan_desc': get_val(row, col_map, 'plan_desc'),  # full plan name from census
@@ -360,14 +466,29 @@ def _parse_row_per_person(df, col_map):
             }
             # Key uses first/last to avoid dups
             key = f"{first.lower()} {last.lower()}"
-            if key not in result: result[key] = current_emp
+            if key not in result:
+                result[key] = new_emp
+            
+            # Crucial fix: always point current_emp to the record in the main result dict
+            current_emp = result[key]
+
         elif is_dependent and current_emp is not None:
             dep_last = last or current_emp['last']
             if not dep_relation: dep_relation = inferred_rel or 'CH'
-            current_emp['dependents'].append({
+            
+            dep_data = {
                 'first': first, 'last': dep_last, 'gender': _gender_code(get_val(row, col_map, 'gender')),
                 'dob': dob, 'relation': dep_relation, 'zip': get_val(row, col_map, 'zip') or current_emp.get('zip', '')
-            })
+            }
+            
+            # Deduplicate dependents within this employee
+            is_dup = any(
+                d['first'].lower() == dep_data['first'].lower() and 
+                d['last'].lower() == dep_data['last'].lower() 
+                for d in current_emp['dependents']
+            )
+            if not is_dup:
+                current_emp['dependents'].append(dep_data)
     return result
 
 def _parse_grouped(df, col_map):

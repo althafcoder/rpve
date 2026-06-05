@@ -197,7 +197,11 @@ def run_llm_resolution(
             logger.info(f"Applying match: Row {target_row} ({c_name}) -> Invoice ({target_invoice['raw_name']})")
             if plan_col and target_invoice.get('plan'):
                 cell = ws.cell(row=target_row, column=plan_col)
-                if not cell.value:
+                existing_val = str(cell.value or '').strip().lower()
+                is_generic = existing_val in {'base', 'core', 'buy up', 'buy-up', 'waived', 'not eligible', 'high', 'low', 'standard', 'premium', 'basic'}
+                is_empty = existing_val == '' or existing_val == 'nan' or existing_val == 'none'
+                
+                if is_empty or is_generic:
                     cell.value = target_invoice['plan']
                     cell.font = _FONT
                     cell.alignment = _LEFT

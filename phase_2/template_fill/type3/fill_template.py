@@ -18,7 +18,11 @@ Filled RAPT xlsx with all RAPT columns including Discrepancies.
 import re
 import logging
 import argparse
+import os
+import json
 from collections import defaultdict
+from openai import OpenAI
+from dotenv import load_dotenv
 
 import pandas as pd
 from openpyxl import load_workbook
@@ -74,45 +78,34 @@ def _tokens(name) -> list:
     if not parts:
         return []
         
+    cleaned_parts = []
     if len(parts) >= 3:
-        result = [parts[0]]
+        cleaned_parts.append(parts[0])
         for p in parts[1:-1]:
-            if len(p) == 1:
-                continue  # drop middle initial
-            result.append(p)
-        result.append(parts[-1])
-        return result
-    return parts
+            if len(p) > 1:
+                cleaned_parts.append(p)
+        cleaned_parts.append(parts[-1])
+    else:
+        cleaned_parts = parts
+        
+    return cleaned_parts
 
 
 def _make_key(name) -> str:
     """
-    Canonical lookup key: always stored as 'firstname lastname' order.
-    Works for:
-      - 'First Last'           → 'first last'
-      - 'Last, First'          → 'first last'
-      - 'LAST FIRST' (invoice) → stored under BOTH 'last first' AND 'first last'
-        but _lookup_keys() returns both so either direction finds it.
+    Canonical lookup key: tokens sorted alphabetically.
+    This ensures 'First Last' and 'Last First' always produce the same key.
     """
-    return " ".join(_tokens(name))
+    return " ".join(sorted(_tokens(name)))
 
 
 def _lookup_keys(name) -> list:
     """
-    Return all candidate lookup keys for a name.
-    For a 2-token name both 'a b' and 'b a' are returned so
-    'LAST FIRST' invoice names match 'First Last' census entries.
-    For 3+ token names only the canonical form is returned (already handles
-    middle names by stripping them in _tokens).
+    Return candidate lookup keys. Since _make_key is now order-independent,
+    we only need one canonical key.
     """
-    toks = _tokens(name)
-    if not toks:
-        return []
-    key = " ".join(toks)
-    keys = [key]
-    if len(toks) == 2 and toks[0] != toks[1]:
-        keys.append(f"{toks[1]} {toks[0]}")   # reversed
-    return keys
+    key = _make_key(name)
+    return [key] if key else []
 
 
 def _is_valid_name(name) -> bool:
@@ -124,24 +117,62 @@ def _is_valid_name(name) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Other helpers
+# Invoice Loading Helpers
 # ---------------------------------------------------------------------------
-def _make_key(name) -> str:
-    """Canonical lookup key: always stored as 'firstname lastname' order."""
-    return " ".join(_tokens(name))
+def _detect_invoice_columns_llm(df: pd.DataFrame) -> dict:
+    """Uses LLM to dynamically map unpredictable invoice column headers."""
+    load_dotenv()
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        logger.warning("OPENAI_API_KEY missing. Skipping LLM invoice column detection.")
+        return {}
+
+    client = OpenAI(api_key=api_key)
+    headers = list(df.columns)
+    sample_data = df.head(3).to_dict(orient='records')
+    
+    system_prompt = (
+        "You are a highly accurate data mapping expert. Your task is to map extracted invoice column headers "
+        "to our standard internal fields. Use the provided sample data to understand the content of each column.\n\n"
+        "Standard Fields:\n"
+        "- full_name: The employee or subscriber's full name.\n"
+        "- coverage: Coverage tier or level (e.g., EE, ES, FAM, EC).\n"
+        "- plan_name: The name of the medical or dental plan being billed.\n"
+        "- premium: The current billed premium amount (usually a dollar value).\n"
+        "- zip: Zip code or postal code.\n\n"
+        "CRITICAL RULES:\n"
+        "1. Return ONLY a valid JSON object mapping our Standard Fields to the EXACT column headers from the file.\n"
+        "2. Do NOT guess blindly. If a field truly does not exist in the file, omit it from the JSON."
+    )
+    
+    user_prompt = (
+        f"Column Headers:\n{headers}\n\n"
+        f"Sample Data (First 3 rows):\n{json.dumps(sample_data, indent=2, default=str)}"
+    )
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.0
+        )
+        mapping = json.loads(response.choices[0].message.content)
+        valid_mapping = {k: v for k, v in mapping.items() if v in headers}
+        logger.info(f"LLM Dynamic Invoice Mapping: {valid_mapping}")
+        return valid_mapping
+    except Exception as e:
+        logger.error(f"LLM invoice column detection failed: {e}")
+        return {}
 
 
-# ---------------------------------------------------------------------------
-# Step 1: Load invoice (BENEFITS_BILLING)
-# ---------------------------------------------------------------------------
 def load_invoice(path: str) -> dict:
     """
     Returns dict keyed by ALL candidate lookup keys for each employee name.
-    BENEFITS_BILLING positional layout (after header row):
-      col0=full_name, col1=first, col2=middle, col3=last,
-      col4=coverage,  col5=plan_name, col6=plan_type,
-      col7=current_premium, col8=adj, col9=birth, col10=gender,
-      col11=home_zip, col12=billing_period
+    Dynamically maps columns using an LLM, falling back to static indices.
     """
     xl = pd.ExcelFile(path)
     sheet = next(
@@ -153,30 +184,72 @@ def load_invoice(path: str) -> dict:
     probe = pd.read_excel(path, sheet_name=sheet, nrows=10, header=None)
     hrow = 0
     for i, row in probe.iterrows():
-        if any(str(v).lower() in ('full name', 'first name', 'plan name') for v in row if pd.notna(v)):
+        if any(str(v).lower() in ('full name', 'first name', 'plan name', 'employee name', 'subscriber') for v in row if pd.notna(v)):
             hrow = i
             break
 
-    df = pd.read_excel(path, sheet_name=sheet, skiprows=hrow + 1, header=None)
+    df = pd.read_excel(path, sheet_name=sheet, skiprows=hrow)
+    # Convert all columns to strings to avoid type issues during dict lookup
+    df.columns = df.columns.astype(str)
+    
+    col_map = _detect_invoice_columns_llm(df)
+    
+    # Static Fallback mapping if LLM fails
+    if not col_map:
+        logger.warning("Falling back to static index-based invoice column mapping.")
+        cols = list(df.columns)
+        col_map = {
+            'full_name': cols[0] if len(cols) > 0 else None,
+            'coverage':  cols[4] if len(cols) > 4 else None,
+            'plan_name': cols[5] if len(cols) > 5 else None,
+            'premium':   cols[7] if len(cols) > 7 else None,
+            'zip':       cols[11] if len(cols) > 11 else None
+        }
+
     lookup = {}
 
+    # Medical vs Ancillary filtering
+    ANCILLARY_KEYWORDS = {'dental', 'vision', 'life', 'ltd', 'std', 'disability', 'ad&d', 'voluntary', 'accident', 'critical', 'hospital'}
+
     for _, row in df.iterrows():
-        row_list = list(row)
-        raw_full = str(row_list[0] if row_list else '').strip()
-        if not raw_full or not _is_valid_name(raw_full):
+        name_col = col_map.get('full_name')
+        if not name_col:
+            continue
+            
+        raw_full = str(row.get(name_col, '')).strip()
+        if not raw_full or not _is_valid_name(raw_full) or raw_full == 'nan':
             continue
 
-        coverage_raw = row_list[4]  if len(row_list) > 4  else None
-        plan_raw     = row_list[5]  if len(row_list) > 5  else None
-        premium_raw  = row_list[7]  if len(row_list) > 7  else None
-        zip_raw      = row_list[11] if len(row_list) > 11 else None
+        # Canonical lookup key
+        canon_keys = _lookup_keys(raw_full)
+        if not canon_keys:
+            continue
+        primary_key = canon_keys[0]
+
+        # If we already have a medical row for this person, skip
+        if primary_key in lookup:
+            continue
+
+        cov_col  = col_map.get('coverage')
+        plan_col = col_map.get('plan_name')
+        prem_col = col_map.get('premium')
+        zip_col  = col_map.get('zip')
+
+        coverage_raw = row.get(cov_col) if cov_col else None
+        plan_raw     = row.get(plan_col) if plan_col else None
+        premium_raw  = row.get(prem_col) if prem_col else 0.0
+        zip_raw      = row.get(zip_col) if zip_col else None
 
         if isinstance(premium_raw, str):
             premium_raw = re.sub(r'[^\d.]', '', premium_raw)
             try:    premium_raw = float(premium_raw)
-            except: premium_raw = None
-        elif isinstance(premium_raw, float) and pd.isna(premium_raw):
-            premium_raw = None
+            except: premium_raw = 0.0
+        elif pd.isna(premium_raw):
+            premium_raw = 0.0
+
+        # Strict per-row $250 filter (Medical selection rule)
+        if premium_raw < 250:
+            continue
 
         zip_val = str(zip_raw).strip() if zip_raw and pd.notna(zip_raw) else ''
 
@@ -188,14 +261,16 @@ def load_invoice(path: str) -> dict:
             'zip':      zip_val,
         }
 
-        # Store under every candidate key so LAST FIRST and First Last both resolve
-        for key in _lookup_keys(raw_full):
-            if key:
-                lookup[key] = entry
+        # Store under canonical key
+        lookup[primary_key] = entry
+        # Store under reversed key if applicable to allow flexible lookup
+        if len(canon_keys) > 1:
+            lookup[canon_keys[1]] = entry
 
     unique = len({v['raw_name'] for v in lookup.values()})
-    logger.info(f"Invoice loaded: {unique} employees from '{sheet}'")
+    logger.info(f"Invoice loaded: {unique} employees (filtered for premium >= $250)")
     return lookup
+
 
 
 # ---------------------------------------------------------------------------
@@ -321,10 +396,23 @@ def write_employee_row(ws, row_idx, data_row_num, emp, inv, cols):
     _wcell(ws, row_idx, cols.get('cobra'),    'N',             _CENTER)
 
     if inv:
-        # Prefer the census plan name (full, accurate) over the invoice plan name
-        # (which may be truncated or use carrier-branded naming).
-        # Fall back to invoice plan name only when census has no plan description.
-        plan_name = emp.get('plan_desc') or inv.get('plan') or ''
+        # Check if the census plan description is just a generic election category
+        cen_plan = emp.get('plan_desc')
+        inv_plan = inv.get('plan')
+        
+        is_generic_census = False
+        if cen_plan:
+            cen_lower = str(cen_plan).strip().lower()
+            if cen_lower in {'base', 'core', 'buy up', 'buy-up', 'waived', 'not eligible', 'high', 'low', 'standard', 'premium', 'basic'}:
+                is_generic_census = True
+
+        # Prefer the census plan name UNLESS it is a generic election category,
+        # in which case the invoice plan name (if available) is much better.
+        if cen_plan and not is_generic_census:
+            plan_name = cen_plan
+        else:
+            plan_name = inv_plan or cen_plan or ''
+            
         _wcell(ws, row_idx, cols.get('plan'), plan_name, _LEFT)
         if inv.get('premium') is not None:
             _wcell(ws, row_idx, cols.get('premium'), inv['premium'], _CENTER, '$#,##0.00')
