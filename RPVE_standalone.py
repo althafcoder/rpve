@@ -847,6 +847,13 @@ You MUST NEVER treat the alphanumeric prefix as an ignored group/policy code. Yo
 - Example: Medical=$334.78, Dental=$27.90, Vision=$7.70, Total Due=$412.38 → current_premium="$334.78" ✅ NOT "$412.38" ❌
 - **If you return Total Due, Dental, Vision, or Garner HRA in any field, you have failed the task.**
 
+🔹 CIGNA "BILLING DETAIL BY GROUP" SPECIAL RULES (CRITICAL):
+- If the document header contains "BILLING DETAIL BY GROUP" and/or "cigna healthcare", you MUST extract the value from the "Total (4)" column (the far-right total column) as the `current_premium`.
+- **STRICTLY FORBIDDEN:** Do NOT use the "Medical" column value for `current_premium` on these forms. The "Medical" column only shows a partial amount.
+- The "Total (4)" column = Medical + Claims Funding combined. This is the correct premium to extract.
+- Example: If Medical=$275.67, Amount Due=$275.67, Claims Funding=$473.35, Total (4)=$749.02 → current_premium="$749.02" ✅ NOT "$275.67" ❌
+- Example: If Medical=$863.08, Amount Due=$863.08, Claims Funding=$1,502.29, Total (4)=$2,365.37 → current_premium="$2,365.37" ✅ NOT "$863.08" ❌
+
 🔹 BLUECROSS BLUE SHIELD (BCBS) / ANTHEM SPECIAL RULES (CRITICAL):
 - **ALWAYS extract the value from the "Total Premium" column as the `current_premium`.**
 - **STRICTLY FORBIDDEN:** Do NOT use the "Employee Medical", "Dependent(s) Medical", or "Total Medical" columns for the premium value on these forms. 

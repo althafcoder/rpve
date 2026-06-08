@@ -392,7 +392,7 @@ def _find_columns(ws) -> dict[str, int | None]:
                 current_cols['premium'] = c; score += 1
             elif 'plan' in v:
                 current_cols['plan'] = c; score += 1
-            elif 'discrep' in v:
+            elif 'discrep' in v or v == 'notes':
                 current_cols['disc'] = c; score += 3  # High weight for validation column
             elif 'relation' in v and 'discrep' not in v:  # catches 'Relationship', 'Relation', 'Relationship to Employee', etc.
                 current_cols['relation'] = c; score += 1
@@ -424,18 +424,80 @@ def _get_name_from_row(ws, row_idx: int, cols: dict) -> str:
 # MATCHING ENGINE
 # ===========================================================================
 
+def _has_initials(tokens: list[str]) -> bool:
+    """Return True if at least one token looks like an initial (single letter)."""
+    return any(len(t) == 1 for t in tokens)
+
+
+def _initials_match(initial_toks: list[str], full_toks: list[str]) -> bool:
+    """
+    Check if initialed name tokens match full name tokens.
+    Strategy:
+      1. Last names must match exactly.
+      2. Each initial (single-letter token) from the invoice must match
+         the starting letter of at least one token in the census full name.
+    Example: ['r', 'l', 'brown'] matches ['ruth', 'clark', 'brown']
+             because last_name 'brown'=='brown', 'r' matches 'ruth', 'l' matches 'clark' (no — but let's be lenient)
+    Actually: we match last name, then check each initial against the remaining full tokens.
+    """
+    if not initial_toks or not full_toks:
+        return False
+
+    # Extract last name from each (assume last token)
+    inv_last = initial_toks[-1]
+    cen_last = full_toks[-1]
+
+    # Last name must match (exact or one contains the other for hyphenated)
+    if inv_last != cen_last:
+        # Handle hyphenated names: "clark-brown" contains "brown"
+        if inv_last not in cen_last and cen_last not in inv_last:
+            return False
+
+    # Get the initials (all single-letter tokens) from the invoice name
+    inv_initials = [t for t in initial_toks[:-1] if len(t) == 1]
+    if not inv_initials:
+        return False  # No initials to match — not an initial-based name
+
+    # Get the non-last-name tokens from the census (first/middle names)
+    cen_first_tokens = full_toks[:-1]
+    if not cen_first_tokens:
+        return False  # Census has no first name tokens
+
+    # Check that the FIRST initial matches the start of at least one census token.
+    # Additional initials (middle initials) are allowed but not required to match,
+    # since census often lacks middle names (e.g., "J.A. Miller" vs "Jeffrey Miller").
+    available = list(cen_first_tokens)
+    first_matched = False
+    total_matched = 0
+    for i, ini in enumerate(inv_initials):
+        matched = False
+        for idx, ft in enumerate(available):
+            if ft.startswith(ini):
+                available.pop(idx)
+                matched = True
+                total_matched += 1
+                break
+        if i == 0 and not matched:
+            return False  # First initial MUST match
+        if i == 0:
+            first_matched = True
+
+    # Require at least the first initial matched
+    return first_matched
+
+
 def match_name(
     raw_name: str,
     invoice_lookup: dict[str, dict],
     threshold: float = 85.0,
 ) -> tuple[dict | None, str, float]:
     """
-    Try to find invoice_lookup entry for raw_name using 3-pass strategy.
+    Try to find invoice_lookup entry for raw_name using multi-pass strategy.
 
     Returns:
         (entry, match_type, confidence)
           entry      — the matched invoice dict, or None
-          match_type — 'exact' | 'token_swap' | 'fuzzy' | 'none'
+          match_type — 'exact' | 'token_swap' | 'initial' | 'fuzzy' | 'none'
           confidence — 0-100
     """
     if not raw_name:
@@ -454,6 +516,94 @@ def match_name(
     for inv_key, entry in invoice_lookup.items():
         if entry.get('tokens') == raw_tok_set:
             return entry, 'token_swap', 100.0
+
+    # --- Pass 2.75: Initial-to-Full-Name Match ---
+    # Handles invoices that use initials (e.g. "R.L. Brown") vs census
+    # full names (e.g. "Ruth Clark-Brown"). We try both directions:
+    # census might have initials OR invoice might have initials.
+    # We use _all_tokens_dedup which preserves single-letter middle tokens
+    # (unlike _tokens which drops them as "middle initials") and deduplicates
+    # doubled tokens from the concatenated raw_name format ("first last full_name").
+    def _all_tokens_dedup(raw) -> list[str]:
+        """Like _tokens but keeps ALL single-letter tokens (initials).
+        Also deduplicates tokens that appear when raw_name concatenates
+        first+last and full_name (e.g., 'R.L. Brown Brown, R.L.' -> ['r','l','brown'])."""
+        cleaned = _clean(raw)
+        all_toks = [p for p in cleaned.split() if p not in _STRIP_TOKENS]
+        # Deduplicate: take shortest non-repeating prefix
+        # e.g., ['r','l','r','l','brown','brown'] -> ['r','l','brown']
+        # The raw_name is "first last full_name" so the first half is the canonical form
+        if len(all_toks) >= 4:
+            half = len(all_toks) // 2
+            first_half = all_toks[:half]
+            second_half = all_toks[half:]
+            # Check if the second half is a permutation of the first half
+            if sorted(first_half) == sorted(second_half):
+                return first_half
+        # For non-duplicated names, just deduplicate while preserving order
+        seen = set()
+        result = []
+        for t in all_toks:
+            if t not in seen:
+                seen.add(t)
+                result.append(t)
+        return result
+
+    raw_all_toks = _all_tokens_dedup(raw_name)
+    if len(raw_all_toks) >= 2:
+        # Collect ALL initial-match candidates first, then decide.
+        # This prevents false positives when multiple people share
+        # the same last name + first initial (e.g., "R. Smith" could
+        # match "Robert Smith" or "Rachel Smith").
+        initial_candidates = []
+        seen_raw_names = set()
+        for inv_key, entry in invoice_lookup.items():
+            entry_raw = entry.get('raw_name', '')
+            if entry_raw in seen_raw_names:
+                continue
+            seen_raw_names.add(entry_raw)
+
+            inv_all_toks = _all_tokens_dedup(entry_raw)
+            if not inv_all_toks or len(inv_all_toks) < 2:
+                continue
+
+            matched = False
+            conf = 0.0
+
+            # Case A: Invoice has initials, census has full names
+            if _has_initials(inv_all_toks) and not _has_initials(raw_all_toks):
+                if _initials_match(inv_all_toks, raw_all_toks):
+                    matched, conf = True, 95.0
+
+            # Case B: Census has initials, invoice has full names
+            if not matched and _has_initials(raw_all_toks) and not _has_initials(inv_all_toks):
+                if _initials_match(raw_all_toks, inv_all_toks):
+                    matched, conf = True, 95.0
+
+            # Case C: BOTH sides have initials (e.g., "Beatrice M Eley" vs "B.M. Eley")
+            if not matched and _has_initials(inv_all_toks) and _has_initials(raw_all_toks):
+                inv_ic = sum(1 for t in inv_all_toks if len(t) == 1)
+                raw_ic = sum(1 for t in raw_all_toks if len(t) == 1)
+                if inv_ic > raw_ic and _initials_match(inv_all_toks, raw_all_toks):
+                    matched, conf = True, 90.0
+                elif raw_ic > inv_ic and _initials_match(raw_all_toks, inv_all_toks):
+                    matched, conf = True, 90.0
+
+            if matched:
+                initial_candidates.append((entry, conf))
+
+        # Decision: only auto-resolve if exactly 1 unique candidate
+        if len(initial_candidates) == 1:
+            return initial_candidates[0][0], 'initial', initial_candidates[0][1]
+        elif len(initial_candidates) > 1:
+            # Multiple candidates — ambiguous, flag as 'possible' for human review
+            # Pick the one with highest confidence, but cap at 75% to force review
+            best = max(initial_candidates, key=lambda x: x[1])
+            logger.warning(
+                f"Initial match ambiguous for '{raw_name}': "
+                f"{len(initial_candidates)} candidates found — flagging as possible"
+            )
+            return best[0], 'possible', 75.0
 
     # --- Pass 3: fuzzy across all known keys ---
     best_score = 0.0
@@ -688,6 +838,9 @@ def run_validation(
         matched_suffix = ""
         if match_type in ('canonical', 'token_swap'):
             emp_status = "Matched"
+        elif match_type == 'initial':
+            emp_status = f"Initial Match ({confidence:.0f}%)"
+            matched_suffix = f" -> {match_entry['raw_name']}"
         elif match_type == 'fuzzy' and confidence >= threshold:
             emp_status = f"Fuzzy Match ({confidence:.0f}%)"
             matched_suffix = f" -> {match_entry['raw_name']}"
@@ -735,7 +888,7 @@ def run_validation(
                 audit_entry['action'] = 'flagged_possible'
                 # DO NOT add to claimed_invoices. This keeps the appended row at bottom 
                 # so the user doesn't lose data, and Phase 4 (LLM) can try to match it.
-            elif match_type == 'fuzzy':
+            elif match_type in ('fuzzy', 'initial'):
                 stats['resolved_fuzzy'] += 1
                 audit_entry['action'] = 'resolved_fuzzy'
                 claimed_invoices.add(match_entry['raw_name'])
