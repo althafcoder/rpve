@@ -299,6 +299,19 @@ def fill_template(invoice_lookup: dict, template_path: str, output_path: str) ->
                     logger.debug(f"  Skipping dependent: {first_str} {last_str}")
                     continue
 
+            # ── WAIVER ONLY (WO) SKIP ───────────────────────────────────────
+            # If coverage is 'WO' (Waiver Only), no need to fill.
+            # Leave Plan, Premium, and Discrepancy/Notes columns empty/blank.
+            coverage_col = cols.get("coverage")
+            if coverage_col:
+                cov_val = ws.cell(row=row_idx, column=coverage_col).value
+                if cov_val is not None and str(cov_val).strip().upper() == 'WO':
+                    logger.info(f"  Skipping waiver row {row_idx}: {first_str} {last_str} (coverage='WO')")
+                    _wcell(ws, row_idx, cols.get("plan"),    None, _LEFT)
+                    _wcell(ws, row_idx, cols.get("premium"), None, _CENTER)
+                    _wcell(ws, row_idx, cols.get("disc"),    None, _CENTER)
+                    continue
+
             # Look up in invoice
             inv = None
             for key in _lookup_keys(emp_display):

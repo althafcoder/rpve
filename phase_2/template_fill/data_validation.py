@@ -801,6 +801,35 @@ def run_validation(
         if not raw_name and not disc_val:
             continue
 
+        # ── WAIVER ONLY (WO) SKIP ─────────────────────────────────────────
+        # If the coverage tier is 'WO', do not match or fill.
+        # Clear out Plan, Premium, and Discrepancy/Notes columns.
+        cov_col = col_positions.get('coverage')
+        if cov_col is not None:
+            cov_val = ws.cell(row=row_idx, column=cov_col).value
+            if cov_val is not None and str(cov_val).strip().upper() == 'WO':
+                logger.info(f"  Row {row_idx}: skipping waiver row (coverage='WO')")
+                plan_col = col_positions.get('plan')
+                prem_col = col_positions.get('premium')
+                if plan_col:
+                    ws.cell(row=row_idx, column=plan_col).value = None
+                if prem_col:
+                    ws.cell(row=row_idx, column=prem_col).value = None
+                if disc_col:
+                    ws.cell(row=row_idx, column=disc_col).value = None
+                
+                audit_entry = {
+                    'row':            row_idx,
+                    'raw_name':       raw_name,
+                    'original_status': disc_val,
+                    'match_type':     'waiver',
+                    'confidence':     0.0,
+                    'matched_to':     None,
+                    'action':         'skipped_waiver'
+                }
+                audit_log.append(audit_entry)
+                continue
+
         stats['total_rows'] += 1
 
         is_not_census  = _NOT_ON_CENSUS.lower()  in disc_val.lower()

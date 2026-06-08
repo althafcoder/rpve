@@ -395,6 +395,16 @@ def write_employee_row(ws, row_idx, data_row_num, emp, inv, cols):
     _wcell(ws, row_idx, cols.get('coverage'), emp['coverage'], _CENTER)
     _wcell(ws, row_idx, cols.get('cobra'),    'N',             _CENTER)
 
+    # ── WAIVER ONLY (WO) SKIP ───────────────────────────────────────
+    # If coverage is 'WO' (Waiver Only), no need to fill.
+    # Leave Plan, Premium, and Discrepancy/Notes columns empty/blank.
+    if emp.get('coverage') is not None and str(emp['coverage']).strip().upper() == 'WO':
+        logger.info(f"  Skipping waiver row {row_idx}: {emp['first']} {emp['last']} (coverage='WO')")
+        _wcell(ws, row_idx, cols.get('plan'),    None, _LEFT)
+        _wcell(ws, row_idx, cols.get('premium'), None, _CENTER)
+        _wcell(ws, row_idx, cols.get('disc'),    None, _CENTER)
+        return
+
     if inv:
         # Check if the census plan description is just a generic election category
         cen_plan = emp.get('plan_desc')

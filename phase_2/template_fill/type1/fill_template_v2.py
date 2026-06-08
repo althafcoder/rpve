@@ -285,6 +285,19 @@ class DynamicCensusFiller:
                             
                         continue
 
+                # ── WAIVER ONLY (WO) SKIP ───────────────────────────────────
+                # If coverage is 'WO' (Waiver Only), no need to fill.
+                # Leave Plan, Premium, and Discrepancy/Notes columns empty/blank.
+                if self.census_coverage_column is not None:
+                    cov_val = ws.cell(row=row_idx, column=self.census_coverage_column).value
+                    if cov_val is not None and str(cov_val).strip().upper() == 'WO':
+                        logger.info(f"  Skipping waiver row {row_idx}: {first} {last} (coverage='WO')")
+                        ws.cell(row=row_idx, column=self.target_columns['plan']).value = ''
+                        ws.cell(row=row_idx, column=self.target_columns['premium']).value = ''
+                        if self.discrepancy_column:
+                            ws.cell(row=row_idx, column=self.discrepancy_column).value = ''
+                        continue
+
                 if norm_name in self.source_lookup:
                     data = self.source_lookup[norm_name]
                     extracted_full_name = f"{first} {last}".strip()

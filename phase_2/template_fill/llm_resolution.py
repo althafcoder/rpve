@@ -194,6 +194,16 @@ def run_llm_resolution(
                     )
                     continue
 
+            # ── Guard: never fill a waiver (WO) row ──────────────────────
+            if cov_col is not None:
+                cov_val = str(ws.cell(row=target_row, column=cov_col).value or '').strip().upper()
+                if cov_val == 'WO':
+                    logger.warning(
+                        f"LLM proposed match for waiver row {target_row} "
+                        f"(coverage='WO', name='{c_name}') — SKIPPED."
+                    )
+                    continue
+
             logger.info(f"Applying match: Row {target_row} ({c_name}) -> Invoice ({target_invoice['raw_name']})")
             if plan_col and target_invoice.get('plan'):
                 cell = ws.cell(row=target_row, column=plan_col)
