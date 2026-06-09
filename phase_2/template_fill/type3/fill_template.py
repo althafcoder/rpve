@@ -247,9 +247,11 @@ def load_invoice(path: str) -> dict:
         elif pd.isna(premium_raw):
             premium_raw = 0.0
 
-        # Strict per-row $250 filter (Medical selection rule)
-        if premium_raw < 250:
-            continue
+        # Note: The $250 premium filter has been removed here.
+        # For ADP/PEO invoices, Phase 1's PEO collapse already selected the single
+        # best plan row per employee. Filtering by $250 at this stage would drop
+        # employees whose best extracted row was Dental/Vision, making them appear
+        # as "not available on invoice" even though they ARE on the invoice.
 
         zip_val = str(zip_raw).strip() if zip_raw and pd.notna(zip_raw) else ''
 

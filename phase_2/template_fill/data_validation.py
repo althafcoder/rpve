@@ -199,13 +199,17 @@ def _detect_invoice_columns_llm(df: pd.DataFrame) -> dict:
         "- full_name: The employee or subscriber's full name (or last name if split).\n"
         "- first_name: First name (if separate).\n"
         "- last_name: Last name (if separate).\n"
-        "- coverage: Coverage tier or level (e.g., EE, ES, FAM, EC).\n"
-        "- plan_name: The name of the medical or dental plan being billed.\n"
-        "- premium: The current billed premium amount (usually a dollar value).\n\n"
+        "- coverage: Coverage tier or level (e.g., EE, ES, FAM, EC, Employee Only, Family, WO).\n"
+        "- plan_name: The detailed plan/product name (e.g., 'UnitedHealthcare Choice Plus HDHP 5000', 'Delta Dental PPO 500').\n"
+        "- plan_type: The plan CATEGORY/TYPE (e.g., 'Medical', 'Dental', 'Vision', 'Life', 'Choice Plus'). Look for columns like 'Coverage Type', 'Benefit Type', 'Plan Type'.\n"
+        "- premium: The billed premium amount - look for columns like 'Premium', 'Monthly Premium', 'GHP EE Monthly Contribution', 'Total Cost', 'Amount', 'Monthly Cost'.\n\n"
         "CRITICAL RULES:\n"
         "1. Return ONLY a valid JSON object mapping our Standard Fields to the EXACT column headers from the file.\n"
         "2. Do NOT guess blindly. If a field truly does not exist in the file, omit it from the JSON.\n"
-        "3. If names are split across columns (e.g. 'NAME' and 'Unnamed: 1'), map 'NAME' to 'full_name' or 'last_name' and 'Unnamed: 1' to 'first_name'."
+        "3. If names are split across columns (e.g. 'NAME' and 'Unnamed: 1'), map 'NAME' to 'full_name' or 'last_name' and 'Unnamed: 1' to 'first_name'.\n"
+        "4. IMPORTANT: 'GHP EE Monthly Contribution' is a premium column - map it to 'premium'.\n"
+        "5. IMPORTANT: 'Coverage Type' is a plan category column - map it to 'plan_type'.\n"
+        "6. IMPORTANT: 'Coverage Level' is a coverage tier column - map it to 'coverage'."
     )
     
     user_prompt = (
@@ -321,8 +325,9 @@ def load_invoice_data(invoice_path: str | Path) -> dict[str, dict]:
         elif pd.isna(prem_raw):
             prem_raw = 0.0
 
-        # Strict per-row $250 filter (Medical selection rule)
-        if prem_raw < 250:
+        # Business Rule Filter: Only keep plans with premium >= $200
+        # This matches the Phase 2 logic - Medical plans are always >= $200
+        if prem_raw < 200:
             continue
 
         # If we already have a medical row for this person, skip
@@ -348,7 +353,7 @@ def load_invoice_data(invoice_path: str | Path) -> dict[str, dict]:
                 lookup[key] = entry
 
     unique = len({v['raw_name'] for v in lookup.values()})
-    logger.info(f"Invoice lookup built: {unique} unique employees (filtered for premium >= $250)")
+    logger.info(f"Invoice lookup built: {unique} unique employees (filtered for premium >= $200)")
     return lookup
 
 

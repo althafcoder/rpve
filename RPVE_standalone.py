@@ -165,22 +165,33 @@ If the invoice shows only summary financial data (no individual employee roster)
   coverage_option: billing period (e.g. "03/01/2026 through 03/31/2026")
   current_premium: total amount due
 
-FOR EMPLOYEE ROSTER INVOICES (like ADP):
-Create individual records for each employee plan line:
+FOR EMPLOYEE ROSTER INVOICES (like ADP TotalSource):
+CRITICAL: For EACH employee, you MUST extract EVERY plan line they have — do NOT skip any lines.
+Each plan line for each employee becomes a separate record. Include ALL of:
+  - Medical / Health plans (HMO, PPO, HSA, EPO, HDHP, KAI-*, BC-*, ANT*, KAIPER, ANTHMO, ANTPPO, etc.)
+  - Dental plans (AETDEN, DEN, PPO Dental, etc.)
+  - Vision plans (VSP, Vision, etc.)
+  - Life Insurance plans (LIF, METLDI LIF, Basic Life, etc.)
+  - LTD / Disability plans (LTD, METLDI LTD, etc.)
+  - Any other benefit plan line with a dollar amount
+
+Fields per record:
   first_name: member first name
   last_name: member last name  
   coverage: EXACT coverage tier/code (e.g. Employee, Family, EE+1, E, ES, ESC, EC, E1D, etc.)
-  plan_name: insurance category/type (e.g. Medical, Dental, Vision)
-  coverage_option: specific insurance product name
-  current_premium: dollar amount for that plan line
+  plan_name: insurance category/type — one of: Medical, Dental, Vision, Life, LTD, Other
+  coverage_option: specific insurance product name (e.g. "BC-HMO 30-100-SCA", "KAI-HMO 30-South-CA", "VSP- Choice Vision Plan")
+  current_premium: dollar amount for that INDIVIDUAL plan line (NOT the Total row)
 
 EXTRACTION RULES:
-1. DETECT FORMAT: Look for individual employee names vs summary-only financial data
-2. SUMMARY-ONLY: Extract employer name, billing period, and total financial summary
-3. ROSTER FORMAT: Extract each employee plan line with individual costs
-4. FINANCIAL DATA: Prior balance, adjustments, current cost, admin fees, total due
-5. DATES: Billing date, due date, billing period
-6. BENEFIT DEDUCTION ROSTER: If the document is titled "BENEFIT DEDUCTION ROSTER", you MUST extract the value from the "Monthly Premium" -> "Total" column as the `current_premium`. STRICTLY FORBIDDEN: Do NOT use the "Pay Period Amount" values for the premium.
+1. COMPLETENESS IS MANDATORY: Every employee MUST have all their plan lines extracted. If an employee has Medical + Dental + Vision + Life + LTD, that is 5 separate records.
+2. NEVER SKIP MEDICAL LINES: If you see plan codes like ANTHMO, ANTPPO, ANTBCB, KAIPER, KAIHMO, BCPPO, BCHMO or any HMO/PPO/HSA plan, that is a Medical plan — ALWAYS include it.
+3. DO NOT INCLUDE TOTAL ROWS: Rows labeled "Total" with a sum of all plans are NOT individual plan lines — skip them.
+4. EE ID ROWS: Lines starting with "EE ID:" are identifiers for the employee, not a separate plan. They belong to the employee whose name appeared just before.
+5. DETECT FORMAT: Look for individual employee names vs summary-only financial data.
+6. FINANCIAL DATA: Prior balance, adjustments, current cost, admin fees, total due.
+7. DATES: Billing date, due date, billing period.
+8. BENEFIT DEDUCTION ROSTER: If the document is titled "BENEFIT DEDUCTION ROSTER", you MUST extract the value from the "Monthly Premium" -> "Total" column as the `current_premium`. STRICTLY FORBIDDEN: Do NOT use the "Pay Period Amount" values for the premium.
 
 Use "" for missing values. Return ONLY valid JSON.
 
@@ -911,16 +922,18 @@ You MUST NEVER treat the alphanumeric prefix as an ignored group/policy code. Yo
 
 PDF TEXT: {text}
 """
-    # Page-based chunking with OVERLAP to prevent data loss at page boundaries
+    # Page-based chunking with SMART OVERLAP to prevent data loss at page boundaries
     pages = split_text_by_pages(text)
     chunks = []
     
     if pages:
-        PAGES_PER_CHUNK = 3  # Process 3 pages at a time
+        PAGES_PER_CHUNK = 4  # Increased from 3 to 4 pages per chunk (reduces total chunks)
+        OVERLAP_PAGES = 2    # 2-page overlap to handle page-boundary splits
         
-        # Sliding window with 1-page overlap
-        # Example: [1,2,3], [3,4,5], [5,6,7]...
-        for i in range(0, len(pages), PAGES_PER_CHUNK - 1):
+        # Sliding window with 2-page overlap to ensure orphaned lines are captured
+        # Example with 4-page chunks: [1,2,3,4], [3,4,5,6], [5,6,7,8]...
+        # This gives same protection but ~30% fewer chunks than [1,2,3], [2,3,4], [3,4,5]...
+        for i in range(0, len(pages), PAGES_PER_CHUNK - OVERLAP_PAGES):
             chunk_pages = pages[i : i + PAGES_PER_CHUNK]
             if chunk_pages:
                 chunks.append("\n".join(chunk_pages))
@@ -980,8 +993,13 @@ PDF TEXT: {text}
         # If chunk is too small, don't try LLM, just return empty
         if not chunk_text.strip():
             return [], {}
+        
+        # Apply grouping PER CHUNK to handle page-boundary splits within chunks
+        chunk_text_processed = chunk_text
+        if sub_type in ["engage", "prestige", "velocity"]:
+            chunk_text_processed = group_indented_lines(chunk_text)
 
-        data = _call_llm_for_chunk(chunk_text)
+        data = _call_llm_for_chunk(chunk_text_processed)
         if data is not None:
             return data.get("employees", []), data.get("summary", {})
 
@@ -1553,8 +1571,14 @@ async def process_invoice_data(file_path: Path, original_filename: str, out_dir:
             val_str = str(emp.get("current_premium") or "").replace("$", "").replace(",", "")
             try: premium_val = round(float(re.sub(r'[^\d.-]', '', val_str)), 2)
             except: premium_val = 0.0
-            # apply the $250 rule to ALL document types (including UHC, Excel, and Data Link)
-            if premium_val < 250:
+            # For PEO/ADP documents, skip the $250 filter — the PEO collapse already
+            # selected the single best plan row per employee (typically their medical plan).
+            # Applying $250 here would silently drop employees whose best extracted row
+            # happened to be Dental/Vision (e.g. when LLM missed the medical line on a page).
+            # For all other document types, keep the $250 analysis split.
+            if is_peo:
+                final_employees.append(emp)
+            elif premium_val < 250:
                 analysis_data.append(emp)
             else:
                 final_employees.append(emp)
@@ -1694,7 +1718,7 @@ async def process_flow(files: list[UploadFile] = File(...)):
 
     # ── 4. Long-poll: wait for the job to complete (non-blocking) ─────────────
     # The event loop is free to serve other requests while we sleep.
-    MAX_WAIT_SECONDS = 600   # 10-minute hard limit per job
+    MAX_WAIT_SECONDS = 1200  # 20-minute hard limit per job (increased for larger PDFs with 2-page overlap)
     POLL_INTERVAL    = 1.0   # check every 1 second
     waited = 0.0
 

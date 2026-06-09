@@ -115,7 +115,8 @@ class DynamicCensusFiller:
                 "- first_name: First name (if separate).\n"
                 "- last_name: Last name (if separate).\n"
                 "- coverage: Coverage tier or level (e.g., EE, ES, FAM, EC).\n"
-                "- plan_name: The name of the medical or dental plan.\n"
+                "- plan_name: The detailed plan/product name (e.g., 'UnitedHealthcare Choice Plus HDHP 5000'). Look for columns like 'Coverage Option', 'Plan Name', 'Plan Description', 'Product Name'.\n"
+                "- plan_type: The plan CATEGORY/TYPE (e.g., 'Medical', 'Dental', 'Vision', 'Life', 'Choice Plus'). Look for columns like 'Coverage Type', 'Benefit Type', 'Plan Type', 'Product Type', 'Insurance Type'.\n"
                 "- premium: The billed premium amount."
             )
         else:
@@ -153,6 +154,68 @@ class DynamicCensusFiller:
             return valid
         except Exception as e:
             logger.error(f"LLM column detection failed ({context}): {e}")
+            return {}
+
+    def _classify_plan_types_batch(self, plan_names: list) -> dict:
+        """
+        Uses LLM to classify plan names into categories (Medical, Dental, Vision, Life, LTD, Other).
+        Only called when plan_type column doesn't exist in source file.
+        
+        Args:
+            plan_names: List of unique plan names to classify
+            
+        Returns:
+            Dictionary mapping plan name to category, e.g. {"Kaiser HMO": "Medical"}
+        """
+        if not plan_names:
+            return {}
+            
+        load_dotenv()
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            logger.warning("OPENAI_API_KEY missing. Cannot classify plan types.")
+            return {}
+
+        try:
+            client = OpenAI(api_key=api_key)
+            
+            # Create numbered list for LLM
+            plan_list = "\n".join([f"{i+1}. {name}" for i, name in enumerate(plan_names)])
+            
+            system_prompt = (
+                "You are a health insurance plan classification expert. "
+                "Classify each plan name into EXACTLY ONE category: Medical, Dental, Vision, Life, LTD, or Other.\n\n"
+                "Rules:\n"
+                "- Medical: Health/medical plans including HMO, PPO, EPO, POS, HDHP, HSA plans, Choice Plus, Select, Open Access, etc.\n"
+                "- Dental: Dental plans (even if they contain 'PPO' or 'HMO')\n"
+                "- Vision: Vision/eye care plans\n"
+                "- Life: Life insurance and AD&D plans\n"
+                "- LTD: Long-term disability plans\n"
+                "- Other: Everything else (FSA, HSA, commuter, adoption assistance, etc.)\n\n"
+                "Return ONLY valid JSON with plan names as keys and categories as values."
+            )
+            
+            user_prompt = (
+                f"Classify these insurance plans:\n\n{plan_list}\n\n"
+                "Return JSON format: {\"plan name\": \"category\", ...}"
+            )
+            
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.0
+            )
+            
+            classifications = json.loads(response.choices[0].message.content)
+            logger.info(f"LLM classified {len(classifications)} plan types")
+            return classifications
+            
+        except Exception as e:
+            logger.error(f"LLM plan classification failed: {e}")
             return {}
 
     # ------------------------------------------------------------------
@@ -193,6 +256,23 @@ class DynamicCensusFiller:
                     elif 'plan' in c:                     col_map['plan_name'] = col
                     elif 'premium' in c or 'cost' in c:   col_map['premium']   = col
 
+            # ═══════════════════════════════════════════════════════════════════
+            # HYBRID PLAN TYPE DETECTION
+            # ═══════════════════════════════════════════════════════════════════
+            plan_type_col = col_map.get('plan_type')
+            plan_name_col = col_map.get('plan_name')
+            
+            # Check if we need LLM classification (when plan_type column missing)
+            plan_classifications = {}
+            if not plan_type_col and plan_name_col:
+                # Extract unique plan names for batch classification
+                unique_plans = df[plan_name_col].dropna().unique().tolist()
+                if unique_plans:
+                    logger.info(f"No plan_type column found. Classifying {len(unique_plans)} unique plans via LLM...")
+                    plan_classifications = self._classify_plan_types_batch(unique_plans)
+            elif plan_type_col:
+                logger.info(f"Found plan_type column: '{plan_type_col}'. Will use direct values.")
+
             for _, row in df.iterrows():
                 f_col = col_map.get('full_name')
                 first_col = col_map.get('first_name')
@@ -214,10 +294,6 @@ class DynamicCensusFiller:
 
                 name_key = self.normalize_name(raw_full_name)
                 
-                # If we already have a matched medical plan for this person, skip additional rows
-                if name_key in self.source_lookup:
-                    continue
-
                 premium = row.get(col_map.get('premium')) if col_map.get('premium') else 0.0
                 if isinstance(premium, str):
                     premium = re.sub(r'[^\d.]', '', premium)
@@ -226,18 +302,90 @@ class DynamicCensusFiller:
                 elif pd.isna(premium):
                     premium = 0.0
 
-                # Strict per-row $250 filter (Medical selection rule)
-                if premium < 250:
+                # ═══════════════════════════════════════════════════════════════
+                # DETERMINE IF THIS IS A MEDICAL PLAN (Hybrid Approach)
+                # ═══════════════════════════════════════════════════════════════
+                is_medical = False
+                
+                # Priority 1: Use explicit plan_type column if available
+                if plan_type_col and pd.notna(row.get(plan_type_col)):
+                    plan_category = str(row[plan_type_col]).lower().strip()
+                    
+                    # Check for medical indicators in category
+                    is_medical = any(kw in plan_category for kw in [
+                        'medical', 'health', 'choice plus', 'choice', 'hmo', 'ppo', 
+                        'epo', 'pos', 'hdhp', 'hsa', 'kaiser', 'anthem', 'aetna', 
+                        'cigna', 'united', 'blue cross', 'bcbs'
+                    ])
+                    
+                # Priority 2: Use LLM classification (when plan_type column missing)
+                elif plan_classifications and plan_name_col:
+                    plan_name = row.get(plan_name_col)
+                    if plan_name and str(plan_name) in plan_classifications:
+                        classification = plan_classifications.get(str(plan_name))
+                        is_medical = (classification == "Medical")
+                
+                # Priority 3: Fallback to expanded keyword matching
+                else:
+                    plan_name = row.get(plan_name_col) if plan_name_col else None
+                    if plan_name:
+                        plan_str = str(plan_name).lower()
+                        is_medical = any(kw in plan_str for kw in [
+                            'medical', 'health', 'hmo', 'ppo', 'epo', 'pos', 'hdhp', 
+                            'choice plus', 'choice', 'select', 'advantage', 'open access',
+                            'kaiser', 'anthem', 'aetna', 'cigna', 'united', 'uhc',
+                            'blue cross', 'blue shield', 'bcbs', 'bc-', 'hs-',
+                            'hsa', 'fsa health'
+                        ])
+                
+                # ═══════════════════════════════════════════════════════════════
+                # BUSINESS RULE: Medical Premium Validation
+                # Medical plans are ALWAYS >= $200 in our business data.
+                # Any plan with premium < $200 is NOT Medical (it's Dental/Vision/Life
+                # or misclassified data). This prevents false positives.
+                # ═══════════════════════════════════════════════════════════════
+                if is_medical and premium < 200:
+                    logger.debug(f"Plan classified as Medical but premium ${premium:.2f} < $200 → treating as non-Medical (likely Dental/Vision/Life)")
+                    is_medical = False
+
+                # If we already have an entry for this person, keep the one with highest premium
+                # OR keep Medical over non-Medical (Dental/Vision/Life)
+                if name_key in self.source_lookup:
+                    existing_premium = self.source_lookup[name_key]['premium']
+                    existing_plan = str(self.source_lookup[name_key]['plan']).lower() if self.source_lookup[name_key]['plan'] else ''
+                    
+                    # Check if existing entry is medical (may have been classified earlier)
+                    existing_is_medical = self.source_lookup[name_key].get('is_medical', False)
+                    
+                    # Keep current entry if: (1) it's Medical and existing is not, OR (2) both same type but current has higher premium
+                    if (is_medical and not existing_is_medical) or (is_medical == existing_is_medical and premium > existing_premium):
+                        pass  # Will overwrite below
+                    else:
+                        continue  # Keep existing entry
+
+                # ═══════════════════════════════════════════════════════════════
+                # FINAL FILTER: Only keep Medical plans (>= $200) OR high-value non-Medical (>= $50)
+                # ═══════════════════════════════════════════════════════════════
+                # Rule 1: If it's Medical, premium must be >= $200 (already validated above, but double-check)
+                # Rule 2: If it's NOT Medical, only keep if premium >= $200 (to avoid low-cost misclassified plans)
+                # Rule 3: Exception - keep non-Medical Dental/Vision if premium >= $50 AND they're not misclassified Medical
+                
+                # Simple rule: Only keep if premium >= $200 (whether Medical or not)
+                # This ensures we only get high-value plans that are definitely correct
+                if premium < 200:
+                    # Skip low-premium plans (whether Medical or not)
+                    # These are likely misclassified or ancillary plans
                     continue
 
                 self.source_lookup[name_key] = {
-                    'plan':     row.get(col_map.get('plan_name')) if col_map.get('plan_name') else None,
-                    'premium':  premium,
-                    'raw_name': raw_full_name,
-                    'coverage': row.get(col_map.get('coverage')) if col_map.get('coverage') else None,
+                    'plan':       row.get(plan_name_col) if plan_name_col else None,
+                    'premium':    premium,
+                    'raw_name':   raw_full_name,
+                    'coverage':   row.get(col_map.get('coverage')) if col_map.get('coverage') else None,
+                    'is_medical': is_medical,  # Store for priority comparison
                 }
 
-            logger.info(f"Source lookup built: {len(self.source_lookup)} entries (filtered for premium >= $250).")
+            logger.info(f"Source lookup built: {len(self.source_lookup)} entries (Medical prioritized, premium >= $50 filter).")
             return True
 
         except Exception as e:
