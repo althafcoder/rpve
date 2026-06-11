@@ -133,10 +133,24 @@ def _execute_job(job_id: str) -> None:
                 Path(ref_census).name if ref_census else "None",
             )
         elif len(xlsx_files) >= 2:
-            # Direct Excel Flow: first excel is the "invoice"
-            pdf_path       = xlsx_files[0]
-            template_path  = str(xlsx_files[1])
-            ref_census     = str(xlsx_files[2]) if len(xlsx_files) > 2 else None
+            # Direct Excel Flow: try to intelligently pick which is the "invoice"
+            import flow_orchestrator
+            
+            f1 = xlsx_files[0]
+            f2 = xlsx_files[1]
+            
+            # Heuristic: if f1 looks like a census and f2 looks like an invoice, swap them.
+            # (By default, xlsx_files is sorted alphabetically)
+            if flow_orchestrator.is_likely_source_invoice(f2) and not flow_orchestrator.is_likely_source_invoice(f1):
+                logger.info("    -> Heuristic: Swapping Excel order (f2 looks like Source, f1 looks like Template)")
+                pdf_path      = f2
+                template_path = str(f1)
+            else:
+                pdf_path      = f1
+                template_path = str(f2)
+                
+            ref_census = str(xlsx_files[2]) if len(xlsx_files) > 2 else None
+            
             logger.info(
                 "Inputs — Direct Excel Source: %s | Template: %s | Ref: %s",
                 pdf_path.name,
