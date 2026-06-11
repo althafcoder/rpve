@@ -89,6 +89,36 @@ def classify_excel_template(excel_path: Path) -> str:
         return "type2"
 
 
+def is_likely_source_invoice(excel_path: Path) -> bool:
+    """
+    Returns True if the Excel file looks more like an invoice/billing report than a census.
+    Heuristics:
+    1. Filename contains 'report', 'billing', 'invoice', 'premium', 'invoice'.
+    2. Content contains 'monthly premium', 'billed', 'arrears', 'amount due'.
+    """
+    name = excel_path.name.lower()
+    if any(k in name for k in ['report', 'billing', 'invoice', 'premium']):
+        if 'census' not in name:
+            return True
+    
+    try:
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            df = pd.read_excel(excel_path, nrows=20, header=None)
+        all_text = " ".join([str(val).lower() for val in df.values.flatten() if pd.notna(val)])
+        
+        invoice_kws = ['premium', 'billed', 'amount due', 'arrears', 'total cost', 'billing period']
+        census_kws  = ['census', 'home zip', 'cobra', 'hire date', 'birth date']
+        
+        invoice_score = sum(1 for k in invoice_kws if k in all_text)
+        census_score  = sum(1 for k in census_kws if k in all_text)
+        
+        return invoice_score > census_score
+    except:
+        return False
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Main entry point — called from job_worker._execute_job()
 # ─────────────────────────────────────────────────────────────────────────────
