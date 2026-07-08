@@ -61,7 +61,9 @@ const Index = () => {
     const a = document.createElement("a");
     a.href = url;
     a.download = `merged_claims_${Date.now()}.json`;
+    document.body.appendChild(a);
     a.click();
+    document.body.removeChild(a);
     URL.revokeObjectURL(url);
   }, [getAllClaims]);
 
@@ -86,7 +88,9 @@ const Index = () => {
     const a = document.createElement("a");
     a.href = url;
     a.download = `merged_claims_${Date.now()}.csv`;
+    document.body.appendChild(a);
     a.click();
+    document.body.removeChild(a);
     URL.revokeObjectURL(url);
   }, [getAllClaims]);
 
@@ -99,7 +103,7 @@ const Index = () => {
 
     setIsMerging(true);
     try {
-      const response = await fetch("/api/claim-summary", {
+      const response = await fetch("/RPVE/api/claim-summary", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ claims }),

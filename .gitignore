@@ -17,9 +17,15 @@ phase_2/template_fill/type3/reference/
 phase_2/template_fill/type3/__pycache__/
 phase_2/template_fill/__pycache__/
 phase_2/template_fill/venv/
+venv/
 jobs/
+
 rpve_jobs.db 
 phase_2/template_fill/type4/template census/
 phase_2/template_fill/type4/output/
 phase_2/template_fill/type4/input/
 phase_2/template_fill/type4/expected_output/
+
+rpve_jobs.db
+service.log
+

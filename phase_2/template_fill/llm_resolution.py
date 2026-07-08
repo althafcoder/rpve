@@ -174,6 +174,17 @@ def run_llm_resolution(
 
     match_count = 0
     target_invoice_raw_names = set()
+    
+    # --- NEW LOGIC: Identify all 'WO' rows directly from the Excel ---
+    waiver_rows_indices = set()
+    if cov_col is not None:
+        for r_idx in range(1, ws.max_row + 1): # Iterate through all rows in the worksheet
+            cov_val = str(ws.cell(row=r_idx, column=cov_col).value or '').strip().upper()
+            if cov_val == 'WO':
+                waiver_rows_indices.add(r_idx)
+                logger.info(f"Identified row {r_idx} with coverage='WO' (will skip LLM filling).")
+    # --- END NEW LOGIC ---
+
     for match in matches:
         c_name = match.get('census_name')
         i_name = match.get('invoice_name')
@@ -194,15 +205,14 @@ def run_llm_resolution(
                     )
                     continue
 
-            # ── Guard: never fill a waiver (WO) row ──────────────────────
-            if cov_col is not None:
-                cov_val = str(ws.cell(row=target_row, column=cov_col).value or '').strip().upper()
-                if cov_val == 'WO':
-                    logger.warning(
-                        f"LLM proposed match for waiver row {target_row} "
-                        f"(coverage='WO', name='{c_name}') — SKIPPED."
-                    )
-                    continue
+            # --- NEW LOGIC: Skip LLM filling for 'WO' rows ---
+            if target_row in waiver_rows_indices:
+                logger.warning(
+                    f"LLM proposed match for waiver row {target_row} "
+                    f"(coverage='WO', name='{c_name}') — SKIPPED LLM FILLING."
+                )
+                continue
+            # --- END NEW LOGIC ---
 
             logger.info(f"Applying match: Row {target_row} ({c_name}) -> Invoice ({target_invoice['raw_name']})")
             if plan_col and target_invoice.get('plan'):
@@ -281,6 +291,24 @@ def run_llm_resolution(
 
     if rows_to_delete:
         logger.info(f"Deleted {len(rows_to_delete)} appended 'Not on census' rows.")
+
+    # --- NEW POST-PROCESSING: Clear plan/premium for 'WO' rows ---
+    cleared_wo_count = 0
+    if cov_col is not None and plan_col is not None and prem_col is not None:
+        for r_idx in range(1, ws.max_row + 1):
+            if r_idx in rows_to_delete: # Skip if row is already marked for deletion
+                continue
+            
+            cov_val = str(ws.cell(row=r_idx, column=cov_col).value or '').strip().upper()
+            if cov_val == 'WO':
+                # Clear Plan Description
+                ws.cell(row=r_idx, column=plan_col).value = None
+                # Clear Monthly Total Premium
+                ws.cell(row=r_idx, column=prem_col).value = None
+                cleared_wo_count += 1
+        if cleared_wo_count > 0:
+            logger.info(f"Cleared plan and premium for {cleared_wo_count} 'WO' rows during post-processing.")
+    # --- END NEW POST-PROCESSING ---
 
     if output_excel is None:
         output_excel = validated_excel.with_name(validated_excel.name.replace("VALIDATED_", "LLM_RESOLVED_"))

@@ -21,7 +21,11 @@ GET  /                 Serves RPVE_ui.html
 """
 
 import asyncio
+import logging
+import logging.handlers
+import sys
 import os, re, json, shutil, uuid, time
+from concurrent.futures import ThreadPoolExecutor
 import pdfplumber
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -37,11 +41,6 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 load_dotenv()
-POPPLER_PATH = os.getenv("POPPLER_PATH")
-if POPPLER_PATH and os.path.exists(POPPLER_PATH):
-    if POPPLER_PATH not in os.environ["PATH"]:
-        os.environ["PATH"] += os.pathsep + POPPLER_PATH
-    print(f"[RPVE] Poppler path added to PATH: {POPPLER_PATH}")
 
 BASE_DIR   = Path(__file__).parent
 UPLOAD_DIR = BASE_DIR / "rpve_uploads"
@@ -50,6 +49,126 @@ JOBS_DIR   = BASE_DIR / "jobs"
 UPLOAD_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 JOBS_DIR.mkdir(exist_ok=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CENTRALIZED SERVICE LOGGING
+# ══════════════════════════════════════════════════════════════════════════════
+
+def setup_logging():
+    """
+    Configure centralized logging so ALL backend output is captured in service.log.
+
+    This captures:
+      - All print() calls (via stdout/stderr redirect)
+      - All Python logging (per-job loggers, uvicorn access/error)
+      - Subprocess output logged via logger.debug()
+
+    The log file rotates at 10 MB and keeps the last 5 backups.
+    """
+    log_path = BASE_DIR / "service.log"
+
+    # ── Root logger — catches everything ──────────────────────────────────────
+    root_logger = logging.getLogger()
+    
+    if root_logger.handlers:
+        return  # Already configured
+
+    root_logger.setLevel(logging.DEBUG)
+
+    # File handler — rotating, 10 MB max, keep 5 backups
+    file_handler = logging.handlers.RotatingFileHandler(
+        str(log_path),
+        maxBytes=10 * 1024 * 1024,  # 10 MB
+        backupCount=5,
+        encoding="utf-8",
+    )
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+    )
+    root_logger.addHandler(file_handler)
+
+    class SafeStreamWriter:
+        """Wrapper to prevent UnicodeEncodeError in console output on Windows. [ignoring loop detection]"""
+        def __init__(self, stream):
+            self.stream = stream
+        def write(self, data):
+            try:
+                self.stream.write(data)
+            except UnicodeEncodeError:
+                # Replace unsupported characters with ascii representation
+                encoded = data.encode('ascii', errors='backslashreplace').decode('ascii')
+                self.stream.write(encoded)
+        def flush(self):
+            try:
+                self.stream.flush()
+            except:
+                pass
+
+    # Console handler — keep normal terminal output too
+    console_handler = logging.StreamHandler(SafeStreamWriter(sys.__stdout__))
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(
+        logging.Formatter("%(message)s")
+    )
+    root_logger.addHandler(console_handler)
+
+    # ── Redirect print() / stdout / stderr to the logger ─────────────────────
+    import threading
+    class _StreamToLogger:
+        """File-like object that redirects writes to a Python logger with recursion protection."""
+        _local = threading.local()
+
+        def __init__(self, logger_instance, level):
+            self._logger = logger_instance
+            self._level = level
+
+        def write(self, msg):
+            if msg and msg.strip():
+                # Detect recursion loop
+                if getattr(self._local, 'lock', False):
+                    sys.__stderr__.write(msg)
+                    return
+                
+                try:
+                    self._local.lock = True
+                    for line in msg.rstrip("\n").splitlines():
+                        self._logger.log(self._level, line)
+                finally:
+                    self._local.lock = False
+
+        def flush(self):
+            pass
+
+        def isatty(self):
+            return False
+
+    sys.stdout = _StreamToLogger(logging.getLogger("rpve.stdout"), logging.INFO)
+    sys.stderr = _StreamToLogger(logging.getLogger("rpve.stderr"), logging.WARNING)
+
+    # ── Make per-job loggers propagate to root (so they appear in service.log) ─
+    logging.getLogger("rpve").propagate = True
+
+    # ── Reduce noise from noisy third-party libraries ─────────────────────────
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("openai").setLevel(logging.WARNING)
+    logging.getLogger("PIL").setLevel(logging.WARNING)
+    logging.getLogger("pdfminer").setLevel(logging.WARNING)
+
+    logging.getLogger("rpve.startup").info(
+        "Service logging initialised → %s", log_path
+    )
+
+
+# Initialise logging BEFORE anything else runs
+setup_logging()
+
+POPPLER_PATH = os.getenv("POPPLER_PATH")
+if POPPLER_PATH and os.path.exists(POPPLER_PATH):
+    if POPPLER_PATH not in os.environ["PATH"]:
+        os.environ["PATH"] += os.pathsep + POPPLER_PATH
+    print(f"[RPVE] Poppler path added to PATH: {POPPLER_PATH}")
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -441,7 +560,7 @@ def extract_text(pdf_path: Path, max_pages: int = 1000) -> str:
         elif not any(kw in extracted_upper for kw in VALID_KEYWORDS):
             reason = f"keywords not found (quality: {text_quality_score:.2f})"
         else:
-            reason = f"text quality too low ({text_quality_score:.2f} < 0.55 threshold)"
+            reason = f"text quality too low ({text_quality_score:.2f} < 0.75 threshold)"
         
         print(f"[RPVE] Triggering high-accuracy fallback: {reason}")
         rostaing_text = extract_text_with_rostaing(pdf_path)
@@ -451,7 +570,8 @@ def extract_text(pdf_path: Path, max_pages: int = 1000) -> str:
         # comparable in volume. If Rostaing fails on rotated pages 
         # (producing less text than standard), we stick to standard.
         if rostaing_text and rostaing_text.strip():
-            if len(rostaing_text) >= (len(text) * 0.8):
+            # Lower threshold: OCR text is often much cleaner/shorter than "raw" PDF text
+            if len(rostaing_text) >= (len(text) * 0.20):
                 print(f"[RPVE] Using Rostaing OCR result ({len(rostaing_text)} chars).")
                 return rostaing_text
             else:
@@ -1025,21 +1145,27 @@ PDF TEXT: {text}
 
 
     print(f"[RPVE] LLM extraction ({sub_type}) split into {len(chunks)} chunks...")
-    for i, chunk in enumerate(chunks):
-        label = f"Chunk {i+1}/{len(chunks)}"
-        emps, summ = _process_chunk(chunk, label)
-        if emps is not None and len(emps) > 0:
-            if not final_summary and summ:
-                final_summary = summ
-            all_employees.extend(emps)
-            print(f"  [RPVE] {label} processed -> found {len(emps)} records")
-        elif emps is not None and len(emps) == 0:
-            # LLM returned valid JSON but no employees in this chunk (legitimate)
-            if not final_summary and summ:
-                final_summary = summ
-            print(f"  [RPVE] {label} processed -> 0 records (no employees in section)")
-        else:
-            print(f"  [RPVE] {label} failed: Could not parse JSON from response")
+    
+    # Process chunks in parallel to reduce total time
+    with ThreadPoolExecutor(max_workers=min(len(chunks), 10)) as executor:
+        futures = [
+            executor.submit(_process_chunk, chunk, f"Chunk {i+1}/{len(chunks)}")
+            for i, chunk in enumerate(chunks)
+        ]
+        
+        for i, future in enumerate(futures):
+            label = f"Chunk {i+1}/{len(chunks)}"
+            try:
+                emps, summ = future.result()
+                if emps is not None:
+                    if not final_summary and summ:
+                        final_summary = summ
+                    all_employees.extend(emps)
+                    print(f"  [RPVE] {label} processed -> found {len(emps)} records")
+                else:
+                    print(f"  [RPVE] {label} failed: Could not parse JSON from response")
+            except Exception as e:
+                print(f"  [RPVE] {label} error: {e}")
 
 
     result = {
@@ -1299,6 +1425,7 @@ def build_excel(data: dict, sub_type: str, stem: str, active_employee_fields: li
 
     xlsx_path = out / f"{stem}_RPVE_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
     wb.save(str(xlsx_path))
+    _FILE_REGISTRY[xlsx_path.name] = str(xlsx_path.resolve())  # register for instant download
     print(f"[RPVE] Excel -> {xlsx_path.name}")
     return xlsx_path
 
@@ -1323,6 +1450,7 @@ def build_json_file(data: dict, sub_type: str, stem: str, active_employee_fields
     json_path = out / f"{stem}_RPVE_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     with open(str(json_path), "w", encoding="utf-8") as f:
         json.dump(rows, f, indent=2, ensure_ascii=False)
+    _FILE_REGISTRY[json_path.name] = str(json_path.resolve())  # register for instant download
     print(f"[RPVE] JSON  -> {json_path.name}")
     return json_path
 
@@ -1354,7 +1482,10 @@ app = FastAPI(
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# NOTE: _cache removed — download routing now uses per-job directory scan (rglob).
+# ── Global file registry: filename → absolute path ───────────────────────────
+# Populated whenever build_excel / build_json_file writes a file.
+# Download endpoint checks this first — O(1), no disk scan at all.
+_FILE_REGISTRY: dict[str, str] = {}
 
 FRONTEND_DIST_DIR = BASE_DIR / "frontend" / "dist"
 (FRONTEND_DIST_DIR / "assets").mkdir(parents=True, exist_ok=True)
@@ -1745,15 +1876,21 @@ async def process_flow(files: list[UploadFile] = File(...)):
 
 
 @app.get("/api/download/{filename}", include_in_schema=False)
-async def download(filename: str):
+async def download(filename: str, abs_path: str | None = None):
     """
     Serve a generated output file by name.
 
-    Search order:
+    Fast path: if the caller passes ?abs_path=<full_path>, the file is served
+    directly without any rglob scan (O(1) lookup).  The path is validated to
+    ensure it lives inside JOBS_DIR or OUTPUT_DIR before serving.
+
+    Fallback (slow path — only used when abs_path is missing or invalid):
       1. Per-job work/output directories (jobs/{job_id}/**)
       2. Legacy OUTPUT_DIR subdirectories (rpve_outputs/**)
       3. Root of OUTPUT_DIR
     """
+    ALLOWED_ROOTS = [JOBS_DIR.resolve(), OUTPUT_DIR.resolve()]
+
     def _serve(fp: Path) -> FileResponse:
         mt = (
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -1762,20 +1899,45 @@ async def download(filename: str):
         )
         return FileResponse(path=fp, filename=filename, media_type=mt)
 
+    # ── Path 1 (fastest): in-memory registry lookup — O(1), no disk scan ─────
+    if filename in _FILE_REGISTRY:
+        cached = Path(_FILE_REGISTRY[filename])
+        if cached.exists():
+            return _serve(cached)
+        else:
+            # File was deleted externally — remove stale entry
+            del _FILE_REGISTRY[filename]
+
+    # ── Path 2: abs_path from frontend query param — single file check ────────
+    if abs_path:
+        try:
+            candidate = Path(abs_path).resolve()
+            # Security: only serve files within allowed directories
+            if any(str(candidate).startswith(str(root)) for root in ALLOWED_ROOTS):
+                if candidate.exists() and candidate.is_file():
+                    _FILE_REGISTRY[filename] = str(candidate)  # cache for next time
+                    return _serve(candidate)
+        except Exception:
+            pass  # fall through to rglob
+
+    # ── Path 3 (slow fallback): rglob scan — only hits on server restart ──────
     # 1. Search all per-job directories
     if JOBS_DIR.exists():
         job_matches = list(JOBS_DIR.rglob(filename))
         if job_matches:
+            _FILE_REGISTRY[filename] = str(job_matches[0].resolve())  # cache for next time
             return _serve(job_matches[0])
 
     # 2. Search legacy OUTPUT_DIR subdirectories
     output_matches = list(OUTPUT_DIR.rglob(filename))
     if output_matches:
+        _FILE_REGISTRY[filename] = str(output_matches[0].resolve())  # cache for next time
         return _serve(output_matches[0])
 
     # 3. Root of OUTPUT_DIR
     fp = OUTPUT_DIR / filename
     if fp.exists():
+        _FILE_REGISTRY[filename] = str(fp.resolve())  # cache for next time
         return _serve(fp)
 
     raise HTTPException(404, f"File not found: {filename}")
@@ -1792,7 +1954,7 @@ async def serve_root_files(filename: str):
 
 
 if __name__ == "__main__":
-    import uvicorn, sys
+    import uvicorn
     port = 8009
     if "--port" in sys.argv:
         try: port = int(sys.argv[sys.argv.index("--port") + 1])
@@ -1803,5 +1965,25 @@ if __name__ == "__main__":
     print("="*50)
     print(f"  UI      ->  http://localhost:{port}")
     print(f"  Swagger ->  http://localhost:{port}/docs")
+    print(f"  Logs    ->  {BASE_DIR / 'service.log'}")
     print("="*50 + "\n")
-    uvicorn.run("RPVE_standalone:app", host="0.0.0.0", port=port, reload=True, reload_excludes=["rpve_uploads/*", "rpve_outputs/*", "*.log", "*.txt"])
+
+    # Configure uvicorn to use our existing logging setup instead of its own
+    log_config = {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "handlers": {},
+        "loggers": {
+            "uvicorn":        {"handlers": [], "level": "INFO", "propagate": True},
+            "uvicorn.error":  {"handlers": [], "level": "INFO", "propagate": True},
+            "uvicorn.access": {"handlers": [], "level": "INFO", "propagate": True},
+        },
+    }
+    uvicorn.run(
+        "RPVE_standalone:app",
+        host="0.0.0.0",
+        port=port,
+        reload=True,
+        reload_excludes=["rpve_uploads/*", "rpve_outputs/*", "*.log", "*.txt"],
+        log_config=log_config,
+    )

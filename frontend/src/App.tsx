@@ -13,7 +13,7 @@ const App = () => (
     <TooltipProvider>
       <Toaster />
       <Sonner />
-      <BrowserRouter>
+      <BrowserRouter basename="/RPVE">
         <Routes>
           <Route path="/" element={<Index />} />
           <Route path="/cognethro" element={<Index />} />

@@ -18,11 +18,43 @@ Business logic is 100% preserved from the original run_flow():
 
 import logging
 import sys
-import subprocess
+import os
+import threading
+import importlib.util
 from pathlib import Path
 from typing import Callable, Optional
 
 import pandas as pd
+
+# Global lock for thread-safe module loading
+_load_lock = threading.Lock()
+
+# Cache for loaded modules to avoid redundant exec_module
+_module_cache = {}
+
+def load_phase_module(name: str, path: Path):
+    """Safely loads a module from a path, ensuring its parent is in sys.path for local imports."""
+    with _load_lock:
+        if name in _module_cache:
+            return _module_cache[name]
+        
+        spec = importlib.util.spec_from_file_location(name, str(path))
+        module = importlib.util.module_from_spec(spec)
+        
+        # Add parent directory to sys.path temporarily to resolve local imports in the script
+        parent_dir = str(path.parent)
+        sys.path.insert(0, parent_dir)
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            sys.path.pop(0)
+            
+        _module_cache[name] = module
+        return module
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers (preserved from original)
+# ─────────────────────────────────────────────────────────────────────────────
 
 # Set up paths so that RPVE_standalone can be imported regardless of cwd
 CURRENT_DIR = Path(__file__).parent.absolute()
@@ -119,9 +151,103 @@ def is_likely_source_invoice(excel_path: Path) -> bool:
         return False
 
 
+def post_process_clear_wo_rows(file_path: Path, logger: logging.Logger):
+    """
+    [ignoring loop detection]
+    Post-processing layer: If the plan and premium/amount are present on a row with coverage 'WO', clear them.
+    Also clears discrepancies/status column.
+    """
+    if not file_path or not file_path.exists():
+        return
+
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(str(file_path))
+        modified = False
+        
+        # Process all sheets or at least the active sheet
+        for sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+            
+            # Find the header row
+            header_row = None
+            for r in range(1, 40):
+                row_vals = [str(ws.cell(row=r, column=c).value or '').lower() for c in range(1, min(ws.max_column + 1, 20))]
+                if any(kw in row_vals for kw in ('ee row', 'first name', 'last name', 'relationship', 'coverage')):
+                    header_row = r
+                    break
+            
+            if not header_row:
+                continue
+                
+            # Scan columns in the header row
+            cov_cols = []
+            plan_cols = []
+            prem_cols = []
+            disc_cols = []
+            
+            for c in range(1, ws.max_column + 1):
+                val = str(ws.cell(row=header_row, column=c).value or '').strip().lower()
+                if not val:
+                    continue
+                if 'tier' in val or 'level' in val or 'coverage type' in val:
+                    # 'coverage tier' / 'coverage level' / 'tier' / 'coverage type' is highly specific
+                    cov_cols.insert(0, c) # prioritised
+                elif 'coverage' in val and 'note' not in val and 'desc' not in val:
+                    cov_cols.append(c)
+                elif 'plan' in val or 'product' in val or 'desc' in val:
+                    plan_cols.append(c)
+                elif 'premium' in val or 'amount' in val or 'rate' in val or 'cost' in val:
+                    prem_cols.append(c)
+                elif 'discrep' in val or 'notes' in val or 'status' in val:
+                    disc_cols.append(c)
+            
+            # Fallback for coverage if none found
+            if not cov_cols:
+                for c in range(1, ws.max_column + 1):
+                    val = str(ws.cell(row=header_row, column=c).value or '').strip().lower()
+                    if 'coverage' in val:
+                        cov_cols.append(c)
+            
+            if not cov_cols:
+                continue
+                
+            cov_col = cov_cols[0]
+            logger.info(f"Post-processing clear WO: Sheet '{sheet_name}', Header Row {header_row}, Coverage Col {cov_col}")
+            
+            cleared_count = 0
+            for r in range(header_row + 1, ws.max_row + 1):
+                cov_val = str(ws.cell(row=r, column=cov_col).value or '').strip().upper()
+                if cov_val == 'WO':
+                    # Clear plan columns
+                    for pc in plan_cols:
+                        if ws.cell(row=r, column=pc).value is not None:
+                            ws.cell(row=r, column=pc).value = None
+                            cleared_count += 1
+                    # Clear premium columns
+                    for prc in prem_cols:
+                        if ws.cell(row=r, column=prc).value is not None:
+                            ws.cell(row=r, column=prc).value = None
+                            cleared_count += 1
+                    # Clear discrepancy columns
+                    for dc in disc_cols:
+                        if ws.cell(row=r, column=dc).value is not None:
+                            ws.cell(row=r, column=dc).value = None
+            
+            if cleared_count > 0:
+                logger.info(f"Post-processing clear WO: Cleared {cleared_count} fields in sheet '{sheet_name}'")
+                modified = True
+                
+        if modified:
+            wb.save(str(file_path))
+    except Exception as e:
+        logger.error(f"Post-processing clear WO failed for {file_path}: {e}")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Main entry point — called from job_worker._execute_job()
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def run_job(
     job_id: str,
@@ -266,38 +392,47 @@ def run_job(
 
     phase2_base = CURRENT_DIR / "phase_2" / "template_fill"
 
-    if template_type == "type1":
-        script = phase2_base / "type1" / "fill_template_v2.py"
-        cmd = [sys.executable, str(script), phase1_output_excel, template_path, str(phase2_report_path)]
-
-    elif template_type == "type2":
-        script = phase2_base / "type2" / "fill_template.py"
-        cmd = [sys.executable, str(script), phase1_output_excel, template_path, str(phase2_report_path)]
-
-    elif template_type == "type3":
-        if not ref_census_path:
-            default_ref = phase2_base / "type3" / "reference_census" / "TEPCensus.xlsx"
-            if default_ref.exists():
-                ref_census_path = str(default_ref)
-            else:
-                raise ValueError("Type 3 requires a Reference Census file!")
-        script = phase2_base / "type3" / "fill_template.py"
-        cmd = [sys.executable, str(script), phase1_output_excel, ref_census_path, template_path, str(phase2_report_path)]
-
-    else:
-        raise ValueError(f"Could not identify Excel template type: {template_type}")
-
     logger.info("[3] Executing Phase 2 (Template Fill)...")
-    logger.info("    Running command: %s", " ".join(cmd))
-    result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(script.parent))
+    try:
+        if template_type == "type1":
+            script = phase2_base / "type1" / "fill_template_v2.py"
+            mod = load_phase_module("filler_type1", script)
+            filler = mod.DynamicCensusFiller()
+            if filler.load_source(phase1_output_excel):
+                if not filler.fill_template(template_path, str(phase2_report_path)):
+                    raise RuntimeError("Phase 2 Type 1 filler failed")
+            else:
+                raise RuntimeError("Phase 2 Type 1 could not load source")
 
-    if result.returncode != 0:
-        logger.error("--- Flow Failed in Phase 2 ---\n%s", result.stderr)
-        raise RuntimeError(f"Phase 2 failed: {result.stderr}")
+        elif template_type == "type2":
+            script = phase2_base / "type2" / "fill_template.py"
+            mod = load_phase_module("filler_type2", script)
+            filler = mod.DynamicCensusFiller()
+            if filler.load_source(phase1_output_excel):
+                if not filler.fill_template(template_path, str(phase2_report_path)):
+                    raise RuntimeError("Phase 2 Type 2 filler failed")
+            else:
+                raise RuntimeError("Phase 2 Type 2 could not load source")
 
-    logger.info("    -> Phase 2 (Census Fill) Success!")
-    if result.stdout:
-        logger.debug(result.stdout)
+        elif template_type == "type3":
+            if not ref_census_path:
+                default_ref = phase2_base / "type3" / "reference_census" / "TEPCensus.xlsx"
+                if default_ref.exists():
+                    ref_census_path = str(default_ref)
+                else:
+                    raise ValueError("Type 3 requires a Reference Census file!")
+            script = phase2_base / "type3" / "fill_template.py"
+            mod = load_phase_module("filler_type3", script)
+            mod.fill_rapt_template(phase1_output_excel, ref_census_path, template_path, str(phase2_report_path))
+
+        else:
+            raise ValueError(f"Could not identify Excel template type: {template_type}")
+
+        logger.info("    -> Phase 2 (Census Fill) Success!")
+    except Exception as e:
+        import traceback
+        logger.error("--- Flow Failed in Phase 2 ---\n%s\n%s", e, traceback.format_exc())
+        raise
 
     # ── PHASE 3: Data Validation ─────────────────────────────────────────────
     status_callback("phase3")
@@ -308,23 +443,19 @@ def run_job(
         logger.warning("    [WARN] data_validation.py not found. Skipping Phase 3.")
         validated_report_path = phase2_report_path
     else:
-        val_cmd = [
-            sys.executable, str(validation_script),
-            str(phase2_report_path),
-            phase1_output_excel,
-            str(validated_report_path),
-            "--threshold", "85",
-            "--template-type", template_type,
-        ]
-        logger.info("    Running command: %s", " ".join(val_cmd))
-        val_result = subprocess.run(val_cmd, capture_output=True, text=True)
-
-        if val_result.returncode == 0:
+        try:
+            mod = load_phase_module("data_validation", validation_script)
+            mod.run_validation(
+                filled_path=str(phase2_report_path),
+                invoice_path=phase1_output_excel,
+                output_path=str(validated_report_path),
+                threshold=85,
+                template_type=template_type
+            )
             logger.info("    -> Phase 3 (Data Validation) Success!")
-            if val_result.stdout:
-                logger.debug(val_result.stdout)
-        else:
-            logger.warning("    [WARN] Phase 3 failed (non-fatal). Using Phase 2 output.\n%s", val_result.stderr)
+        except Exception as e:
+            import traceback
+            logger.warning("    [WARN] Phase 3 failed (non-fatal). Using Phase 2 output.\n%s\n%s", e, traceback.format_exc())
             validated_report_path = phase2_report_path
 
     # ── PHASE 4: LLM Resolution ───────────────────────────────────────────────
@@ -340,29 +471,33 @@ def run_job(
         logger.warning("    [WARN] LLM resolution requirements not met. Skipping Phase 4.")
         final_report_path = validated_report_path
     else:
-        llm_cmd = [
-            sys.executable, str(llm_script),
-            str(validated_report_path),
-            str(audit_json),
-            "--output", str(llm_report_path),
-            "--template-type", template_type,
-        ]
-        logger.info("    Running command: %s", " ".join(llm_cmd))
-        llm_result = subprocess.run(llm_cmd, capture_output=True, text=True)
-
-        if llm_result.returncode == 0 and llm_report_path.exists():
-            logger.info("    -> Phase 4 (LLM Resolution) Success!")
-            if llm_result.stdout:
-                logger.debug(llm_result.stdout)
-            if llm_result.stderr:
-                logger.debug(llm_result.stderr)
-            final_report_path = llm_report_path
-        else:
+        try:
+            mod = load_phase_module("llm_resolution", llm_script)
+            mod.run_llm_resolution(
+                validated_excel=validated_report_path,
+                audit_json=audit_json,
+                output_excel=llm_report_path,
+                template_type=template_type
+            )
+            if llm_report_path.exists():
+                logger.info("    -> Phase 4 (LLM Resolution) Success!")
+                final_report_path = llm_report_path
+            else:
+                raise RuntimeError("LLM report file not created")
+        except Exception as e:
+            import traceback
             logger.warning(
-                "    [WARN] Phase 4 failed or skipped. Using Phase 3 output.\n%s",
-                llm_result.stderr if llm_result else "",
+                "    [WARN] Phase 4 failed or skipped. Using Phase 3 output.\n%s\n%s",
+                e, traceback.format_exc()
             )
             final_report_path = validated_report_path
+
+    # ── Clean 'WO' waiver rows in all output files ─────────────────────────
+    logger.info("[Post-process] Cleaning WO rows in report files...")
+    report_paths_to_clean = {phase2_report_path, validated_report_path, final_report_path}
+    for rpath in report_paths_to_clean:
+        if rpath:
+            post_process_clear_wo_rows(Path(rpath), logger)
 
     # ── Build merged result (same shape as original run_flow return value) ───
     merged_result = result_data.copy()
@@ -379,6 +514,7 @@ def run_job(
     merged_result["excel_file"]  = final_report_name
     merged_result["excel_url"]   = f"/api/download/{final_report_name}"
     merged_result["final_report_path"] = str(final_report_path.absolute())
+    merged_result["excel_path"]        = str(final_report_path.absolute())
 
     # Use the audit JSON as the primary source for the UI table view
     if audit_json.exists():

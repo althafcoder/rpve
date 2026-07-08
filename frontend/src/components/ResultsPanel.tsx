@@ -31,6 +31,7 @@ const ResultsPanel = ({
   const [summaryText, setSummaryText] = useState<string | null>(null);
   const [isSummarizing, setIsSummarizing] = useState(false);
   const [activeTab, setActiveTab] = useState("table");
+  const [isDownloadingExcel, setIsDownloadingExcel] = useState(false);
 
   useEffect(() => {
     setActiveTab("table");
@@ -114,7 +115,9 @@ const ResultsPanel = ({
     const a = globalThis.document.createElement("a");
     a.href = url;
     a.download = `${document.name.replace(".pdf", "")}_extracted.json`;
+    globalThis.document.body.appendChild(a);
     a.click();
+    globalThis.document.body.removeChild(a);
     URL.revokeObjectURL(url);
   };
 
@@ -124,8 +127,13 @@ const ResultsPanel = ({
       return;
     }
 
+    setIsDownloadingExcel(true);
     try {
-      const response = await fetch(`/api/download/${document.excelPath}`);
+      // Pass abs_path so backend skips slow rglob scan and serves directly
+      const absParam = document.excelAbsPath
+        ? `?abs_path=${encodeURIComponent(document.excelAbsPath)}`
+        : "";
+      const response = await fetch(`/RPVE/api/download/${document.excelPath}${absParam}`);
       if (!response.ok) throw new Error("Download failed");
 
       const blob = await response.blob();
@@ -133,10 +141,15 @@ const ResultsPanel = ({
       const a = globalThis.document.createElement("a");
       a.href = url;
       a.download = document.excelPath;
+      globalThis.document.body.appendChild(a);
       a.click();
+      globalThis.document.body.removeChild(a);
       URL.revokeObjectURL(url);
     } catch (error) {
       console.error("Excel download error:", error);
+      toast.error("Excel download failed. Please try again.");
+    } finally {
+      setIsDownloadingExcel(false);
     }
   };
 
@@ -150,7 +163,7 @@ const ResultsPanel = ({
     setIsSummarizing(true);
     setSummaryText(null);
     try {
-      const response = await fetch("/api/claim-summary", {
+      const response = await fetch("/RPVE/api/claim-summary", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ claims }),
@@ -306,9 +319,13 @@ const ResultsPanel = ({
           <FileJson className="w-3.5 h-3.5 mr-1.5" />
           Download JSON
         </Button>
-        <Button size="sm" variant="outline" onClick={handleDownloadExcel} disabled={!document.excelPath} className="h-8 text-[11px] font-bold">
-          <Download className="w-3.5 h-3.5 mr-1.5" />
-          Download Excel
+        <Button size="sm" variant="outline" onClick={handleDownloadExcel} disabled={!document.excelPath || isDownloadingExcel} className="h-8 text-[11px] font-bold">
+          {isDownloadingExcel ? (
+            <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
+          ) : (
+            <Download className="w-3.5 h-3.5 mr-1.5" />
+          )}
+          {isDownloadingExcel ? "Downloading..." : "Download Excel"}
         </Button>
         {isLossRun && (
           <Button

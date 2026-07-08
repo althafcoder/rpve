@@ -75,6 +75,7 @@ export interface DocumentFile {
   error: string | null;
   startedAt: number | null;
   completedAt: number | null;
-  excelPath?: string; // Path to Excel file from backend
-  jsonPath?: string;  // Path to JSON file from backend
+  excelPath?: string;    // Filename of Excel file (used in download URL)
+  excelAbsPath?: string; // Full absolute path on server (used to skip rglob)
+  jsonPath?: string;     // Path to JSON file from backend
 }

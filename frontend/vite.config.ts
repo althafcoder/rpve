@@ -5,6 +5,7 @@ import { componentTagger } from "lovable-tagger";
 
 // https://vitejs.dev/config/
 export default defineConfig(({ mode }) => ({
+  base: "/RPVE/",
   server: {
     host: "::",
     port: 8080,
@@ -12,6 +13,11 @@ export default defineConfig(({ mode }) => ({
       overlay: false,
     },
     proxy: {
+      "/RPVE/api": {
+        target: "http://localhost:8009",
+        changeOrigin: true,
+        rewrite: (path: string) => path.replace(/^\/RPVE/, ""),
+      },
       "/api": {
         target: "http://localhost:8009",
         changeOrigin: true,

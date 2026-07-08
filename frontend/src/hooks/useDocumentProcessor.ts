@@ -64,8 +64,8 @@ export function useDocumentProcessor() {
                 });
                 formData.append("ev_mode", String(evMode));
 
-                const endpoint = fileArray.length > 1 ? "/api/process-flow" : "/api/extract";
-                // For a single file we map "files" back to "file" since /api/extract expects "file"
+                const endpoint = fileArray.length > 1 ? "/RPVE/api/process-flow" : "/RPVE/api/extract";
+                // For a single file we map "files" back to "file" since /RPVE/api/extract expects "file"
                 if (fileArray.length === 1) {
                     formData.delete("files");
                     formData.append("file", fileArray[0]);
@@ -109,7 +109,7 @@ export function useDocumentProcessor() {
                 let schema: any = null;
                 if (jsonPath) {
                     try {
-                        const schemaResponse = await fetch(`/api/download/${jsonPath}`);
+                        const schemaResponse = await fetch(`/RPVE/api/download/${jsonPath}`);
                         schema = await schemaResponse.json();
                     } catch (e) {
                         console.error("Failed to fetch schema:", e);
@@ -204,6 +204,7 @@ export function useDocumentProcessor() {
                     result: processedResult,
                     metadata,
                     excelPath: json.output_file,
+                    excelAbsPath: json.excel_path || null,
                     jsonPath: json.output_json,
                     completedAt: Date.now(),
                 });
