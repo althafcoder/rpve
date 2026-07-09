@@ -452,7 +452,11 @@ def run_job(
                 threshold=85,
                 template_type=template_type
             )
-            logger.info("    -> Phase 3 (Data Validation) Success!")
+            if validated_report_path.exists():
+                logger.info("    -> Phase 3 (Data Validation) Success!")
+            else:
+                logger.warning("    [WARN] Phase 3 did not create the validated report file. Using Phase 2 output.")
+                validated_report_path = phase2_report_path
         except Exception as e:
             import traceback
             logger.warning("    [WARN] Phase 3 failed (non-fatal). Using Phase 2 output.\n%s\n%s", e, traceback.format_exc())

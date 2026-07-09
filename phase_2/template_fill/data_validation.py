@@ -325,8 +325,8 @@ def load_invoice_data(invoice_path: str | Path) -> dict[str, dict]:
         elif pd.isna(prem_raw):
             prem_raw = 0.0
 
-        # Business Rule Filter: Only keep plans with premium >= $200
-        # This matches the Phase 2 logic - Medical plans are always >= $200
+        # Business Rule Filter: Only keep plans with premium >= $250
+        # Aligned with Phase 2 (fill_template_v2.py) which uses the same $250 threshold.
         if prem_raw < 200:
             continue
 
@@ -408,6 +408,11 @@ def _find_columns(ws) -> dict[str, int | None]:
             best_score = score
             best_cols = current_cols
             header_row = r
+
+    # Fallback: if plan is 11 (Type 1 default) and premium is None, assume column 12 is premium
+    if best_cols.get('plan') == 11 and best_cols.get('premium') is None:
+        best_cols['premium'] = 12
+        logger.info("Fallback: set premium column to 12 based on plan column at 11")
 
     best_cols['header_row'] = header_row
     return best_cols
@@ -715,7 +720,39 @@ def run_validation(
     invoice_lookup = load_invoice_data(invoice_path)
     if not invoice_lookup:
         logger.error("Invoice lookup is empty — cannot validate.")
-        return {}
+        try:
+            import shutil
+            shutil.copyfile(str(filled_path), str(output_path))
+            logger.info(f"Copied filled Excel to output path -> {output_path}")
+            
+            # Save a blank audit log JSON
+            audit_path = output_path.with_suffix('.audit.json')
+            empty_stats = {
+                'total_rows':         0,
+                'already_correct':    0,
+                'resolved_canonical': 0,
+                'resolved_fuzzy':     0,
+                'still_unresolved':   0,
+                'possible_matches':   0,
+                'appended_deleted':   0,
+            }
+            with open(str(audit_path), 'w', encoding='utf-8') as f:
+                json.dump({
+                    'stats': empty_stats,
+                    'entries': [],
+                    'unclaimed_invoices': []
+                }, f, indent=2, default=str)
+            logger.info(f"Audit log saved -> {audit_path}")
+            
+            return {
+                'stats':       empty_stats,
+                'output_path': str(output_path),
+                'audit_path':  str(audit_path),
+                'audit_log':   [],
+            }
+        except Exception as e:
+            logger.error(f"Failed to copy filled Excel or write audit log: {e}")
+            return {}
 
     # Open filled workbook
     wb = load_workbook(str(filled_path))

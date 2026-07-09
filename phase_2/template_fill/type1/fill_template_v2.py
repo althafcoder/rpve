@@ -218,8 +218,8 @@ class DynamicCensusFiller:
             # Find data start (looking for headers like 'EE Row' or 'First Name')
             start_row = 1
             for r in range(1, 40):
-                row_vals = [str(ws.cell(row=r, column=c).value).lower() for c in range(1, 5)]
-                if 'ee row' in row_vals or 'first name' in row_vals:
+                row_vals = [str(ws.cell(row=r, column=c).value or '').lower() for c in range(1, 6)]
+                if any('ee row' in val or 'first name' in val for val in row_vals):
                     start_row = r + 1
                     break
             
@@ -246,6 +246,17 @@ class DynamicCensusFiller:
                 ws.column_dimensions[letter].width = 30
                 logger.info(f"Appended new Discrepancies column at index {self.discrepancy_column}.")
             logger.info(f"Using census coverage column at index {self.census_coverage_column}.")
+
+            # Write a "Premium" header so Phase 3 (data_validation.py) can detect
+            # the premium column dynamically — without relying on the hardcoded plan==11 fallback.
+            prem_col_idx = self.target_columns['premium']
+            prem_hdr_cell = ws.cell(row=start_row - 1, column=prem_col_idx)
+            if not prem_hdr_cell.value:  # Only write if not already labelled
+                from openpyxl.styles import Font as _Font, Alignment as _Alignment
+                prem_hdr_cell.value     = "Premium"
+                prem_hdr_cell.font      = _Font(name='Arial', bold=True, size=10)
+                prem_hdr_cell.alignment = _Alignment(horizontal='center', vertical='center')
+                logger.info(f"Wrote 'Premium' header at column {prem_col_idx} (row {start_row - 1}).")
 
 
             filled_count = 0

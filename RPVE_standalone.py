@@ -1509,6 +1509,102 @@ async def health():
     return {"status": "ok", "service": "RPVE", "sub_types": list(KEYWORDS.keys())}
 
 
+def forward_fill_plan_continuations(text: str) -> str:
+    """
+    Scans the invoice text page-by-page and identifies plan name headers.
+    If a subsequent page/section has '(cont.)' instead of the repeated plan name,
+    replaces '(cont.)' with the active plan name so that LLM chunking (which receives 
+    only a subset of pages) has the necessary plan name context.
+    """
+    if not text:
+        return text
+
+    # Helper to check if a line is part of a table header
+    def is_header_line(line: str) -> bool:
+        l = line.lower()
+        return any(kw in l for kw in ["empl", "eff", "medical", "total", "name", "date", "*type", "amount", "current", "inforce", "charges", "retroactivity"])
+
+    # Helper to check if a line is a premium sub-row rather than a plan name
+    def is_sub_row(line: str) -> bool:
+        l_strip = line.strip()
+        # Matches e.g., "0520 277.52" or "0106 0.00 $480.23"
+        if re.match(r'^\d{4}\s+[\d.,\s$]+', l_strip):
+            return True
+        return False
+
+    # Split text by page markers
+    pages = re.split(r'(--- Page \d+ ---)', text)
+    reconstructed = []
+    active_plan_lines = []
+
+    for part in pages:
+        if not part.strip() or part.startswith("--- Page"):
+            reconstructed.append(part)
+            continue
+            
+        lines = part.split("\n")
+        new_lines = []
+        
+        header_seen = False
+        collecting_plan = False
+        plan_lines = []
+        
+        for line in lines:
+            l_strip = line.strip()
+            if not l_strip:
+                new_lines.append(line)
+                continue
+                
+            # Detect section/table headers
+            is_header = (
+                "empl" in l_strip.lower() and "name" in l_strip.lower()
+            ) or (
+                "current" in l_strip.lower() and "charges" in l_strip.lower()
+            ) or (
+                "retroactivity" in l_strip.lower() and "charges" in l_strip.lower()
+            )
+            
+            if is_header:
+                header_seen = True
+                collecting_plan = True
+                plan_lines = []
+                new_lines.append(line)
+                continue
+                
+            if collecting_plan:
+                # Employee lines contain commas (names) and digits (dates/amounts)
+                is_employee = "," in l_strip and any(char.isdigit() for char in l_strip)
+                
+                if is_employee:
+                    collecting_plan = False
+                    if plan_lines:
+                        cleaned_plan = [pl for pl in plan_lines if not is_header_line(pl) and not is_sub_row(pl) and "(cont" not in pl.lower() and pl.strip()]
+                        if cleaned_plan:
+                            active_plan_lines = cleaned_plan
+                    new_lines.append(line)
+                else:
+                    if "(cont" in l_strip.lower():
+                        if active_plan_lines:
+                            # Replace (cont.) line with the active plan lines
+                            for apl in active_plan_lines:
+                                new_lines.append(apl)
+                        else:
+                            new_lines.append(line)
+                    else:
+                        plan_lines.append(line)
+                        new_lines.append(line)
+            else:
+                if "(cont" in l_strip.lower() and active_plan_lines:
+                    for apl in active_plan_lines:
+                        new_lines.append(apl)
+                else:
+                    new_lines.append(line)
+                    
+        reconstructed.append("\n".join(new_lines))
+
+    return "".join(reconstructed)
+
+
 async def process_invoice_data(file_path: Path, original_filename: str, out_dir: Path | None = None):
     print(f"\n[RPVE] Processing -> {original_filename}")
     ext = Path(original_filename).suffix.lower()
@@ -1530,6 +1626,9 @@ async def process_invoice_data(file_path: Path, original_filename: str, out_dir:
     try:
         # Using local extract_text function instead of missing identification module
         text = extract_text(file_path)
+        
+        # Forward-fill plan names when they are continued across pages/sections
+        text = forward_fill_plan_continuations(text)
         
         # Consistent Text Output: Save the extracted text for ALL file types
         txt_path = run_out_dir / f"{stem}.txt"

@@ -274,17 +274,49 @@ def run_llm_resolution(
             s = re.sub(r"[^a-z0-9\s]", " ", s)
             s = re.sub(r"\s+", " ", s)
             return s.strip()
+
+        def compact(name: str) -> str:
+            """
+            Normalize a name to a sorted, deduplicated, letter-only string.
+            This handles two problems at once:
+              1. Space splits: 'Uessugui Gomes' == 'Uessuguigomes' (same letters, different spaces)
+              2. Doubled raw_name: Phase 3 stores raw_name as 'Rosanna Uessuguigomes Uessuguigomes, Rosanna'
+                 (first+last+full concatenated). After dedup, both sides reduce to the same string.
+            """
+            s = name.strip().lower()
+            if ',' in s:
+                parts = [p.strip() for p in s.split(',')]
+                s = f"{parts[1]} {parts[0]}" if len(parts) >= 2 else s
+            tokens = re.sub(r"[^a-z\s]", " ", s).split()
+            # Deduplicate while preserving first-occurrence order, then sort for order-independence
+            seen = set()
+            unique_tokens = []
+            for t in tokens:
+                if t not in seen:
+                    seen.add(t)
+                    unique_tokens.append(t)
+            return "".join(sorted(unique_tokens))   # sorted → order-independent join
+
             
         target_invoice_cleaned = {clean_name_for_compare(n) for n in target_invoice_raw_names if n}
+        target_invoice_compact  = {compact(n)               for n in target_invoice_raw_names if n}
         
         for row_idx in range(1, ws.max_row + 1):
             disc_val = str(ws.cell(row=row_idx, column=disc_col).value or "").strip().lower()
             if "not on census" in disc_val:
                 first = str(ws.cell(row=row_idx, column=2).value or "").strip()
-                last = str(ws.cell(row=row_idx, column=3).value or "").strip()
+                last  = str(ws.cell(row=row_idx, column=3).value or "").strip()
                 appended_name = f"{first} {last}".strip()
-                if clean_name_for_compare(appended_name) in target_invoice_cleaned:
+                # Primary check: exact cleaned match
+                # Secondary check: compact (space-stripped) match handles
+                #   'Uessuguigomes' == 'Uessugui Gomes' and similar OCR/space issues
+                if (clean_name_for_compare(appended_name) in target_invoice_cleaned
+                        or compact(appended_name) in target_invoice_compact):
                     rows_to_delete.add(row_idx)
+                    logger.info(
+                        f"Marking row {row_idx} ('{appended_name}') for deletion "
+                        f"— invoice name matched (space-agnostic)."
+                    )
 
     for r in sorted(list(rows_to_delete), reverse=True):
         ws.delete_rows(r)
