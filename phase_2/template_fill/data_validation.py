@@ -296,6 +296,13 @@ def load_invoice_data(invoice_path: str | Path) -> dict[str, dict]:
     if not col_map['full'] and not col_map['first']:
         col_map['full'] = df.columns[0]
 
+    # Clean whitespace and replace empty/whitespace strings with NaN so ffill works (non-destructive add-on)
+    for col_key in ['full', 'first', 'last']:
+        col_name = col_map.get(col_key)
+        if col_name and col_name in df.columns:
+            cleaned_series = df[col_name].astype(str).str.strip().replace({'': None, 'nan': None, 'None': None, '<NA>': None})
+            df[col_name] = cleaned_series.ffill()
+
     lookup: dict[str, dict] = {}
     blocked = ('total', 'subtotal', 'grand total', 'summary', 'record')
 

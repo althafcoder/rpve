@@ -273,6 +273,13 @@ class DynamicCensusFiller:
             elif plan_type_col:
                 logger.info(f"Found plan_type column: '{plan_type_col}'. Will use direct values.")
 
+            # Clean whitespace and replace empty/whitespace strings with NaN so ffill works (non-destructive add-on)
+            for col_key in ['full_name', 'first_name', 'last_name']:
+                col_name = col_map.get(col_key)
+                if col_name and col_name in df.columns:
+                    cleaned_series = df[col_name].astype(str).str.strip().replace({'': None, 'nan': None, 'None': None, '<NA>': None})
+                    df[col_name] = cleaned_series.ffill()
+
             for _, row in df.iterrows():
                 f_col = col_map.get('full_name')
                 first_col = col_map.get('first_name')
