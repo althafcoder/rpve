@@ -117,6 +117,13 @@ class DynamicCensusFiller:
             
             cols = self.find_source_columns(df)
 
+            # Clean whitespace and replace empty/whitespace strings with NaN so ffill works (non-destructive add-on)
+            for col_key in ['full', 'first', 'last']:
+                col_name = cols.get(col_key)
+                if col_name and col_name in df.columns:
+                    cleaned_series = df[col_name].astype(str).str.strip().replace({'': None, 'nan': None, 'None': None, '<NA>': None})
+                    df[col_name] = cleaned_series.ffill()
+
             for _, row in df.iterrows():
                 name_key = ""
                 if cols['full'] and pd.notna(row[cols['full']]):
