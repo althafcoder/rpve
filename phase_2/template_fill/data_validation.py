@@ -400,15 +400,15 @@ def _find_columns(ws) -> dict[str, int | None]:
                 current_cols['first'] = c; score += 2
             elif 'last' in v and 'name' in v:
                 current_cols['last'] = c; score += 2
-            elif 'premium' in v:
+            elif 'premium' in v and not current_cols['premium']:
                 current_cols['premium'] = c; score += 1
-            elif 'plan' in v:
+            elif 'plan' in v and not current_cols['plan']:
                 current_cols['plan'] = c; score += 1
-            elif 'discrep' in v or v == 'notes':
+            elif ('discrep' in v or v == 'notes') and not current_cols['disc']:
                 current_cols['disc'] = c; score += 3  # High weight for validation column
-            elif 'relation' in v and 'discrep' not in v:  # catches 'Relationship', 'Relation', 'Relationship to Employee', etc.
+            elif 'relation' in v and 'discrep' not in v and not current_cols['relation']:  # catches 'Relationship', 'Relation', 'Relationship to Employee', etc.
                 current_cols['relation'] = c; score += 1
-            elif 'coverage' in v or 'tier' in v:
+            elif ('coverage' in v or 'tier' in v) and 'notes' not in v and not current_cols['coverage']:
                 current_cols['coverage'] = c; score += 1
         
         if score > best_score and (current_cols['first'] or current_cols['name']):
@@ -942,7 +942,7 @@ def run_validation(
 
         # ── Apply Updates ──────────────────────────────────────────────
         if emp_status:
-            label = f"Employee Verified: {emp_status}{matched_suffix} | Coverage Verified: {cov_status}"
+            label = f"Employee status : {emp_status}{matched_suffix} | Coverage status : {cov_status}"
             
             fill = _FILL_RED
             if "Matched" in emp_status and cov_status == "Matched":

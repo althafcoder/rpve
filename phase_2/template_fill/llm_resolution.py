@@ -251,7 +251,7 @@ def run_llm_resolution(
                 cov_status = "Mismatched"
 
             cell = ws.cell(row=target_row, column=disc_col)
-            cell.value = f"Employee Verified: LLM Matched | Coverage Verified: {cov_status}"
+            cell.value = f"Employee status : LLM Matched | Coverage status : {cov_status}"
             cell.fill = _FILL_LLM
             cell.font = _FONT
             cell.alignment = _CENTER
