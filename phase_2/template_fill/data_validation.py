@@ -308,17 +308,16 @@ def load_invoice_data(invoice_path: str | Path) -> dict[str, dict]:
 
     for _, row in df.iterrows():
         # Build raw name intelligently from all available components
-        name_parts = []
-        if col_map['first'] and pd.notna(row.get(col_map['first'])):
-            name_parts.append(str(row[col_map['first']]).strip())
-        if col_map['last'] and pd.notna(row.get(col_map['last'])):
-            name_parts.append(str(row[col_map['last']]).strip())
+        raw_name = ""
         if col_map['full'] and pd.notna(row.get(col_map['full'])):
-            val = str(row[col_map['full']]).strip()
-            if val not in name_parts:
-                name_parts.append(val)
-        
-        raw_name = " ".join(name_parts).strip()
+            raw_name = str(row[col_map['full']]).strip()
+        else:
+            name_parts = []
+            if col_map['first'] and pd.notna(row.get(col_map['first'])):
+                name_parts.append(str(row[col_map['first']]).strip())
+            if col_map['last'] and pd.notna(row.get(col_map['last'])):
+                name_parts.append(str(row[col_map['last']]).strip())
+            raw_name = " ".join(name_parts).strip()
 
         if not raw_name or any(b in raw_name.lower() for b in blocked):
             continue

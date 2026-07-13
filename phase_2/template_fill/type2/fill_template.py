@@ -285,17 +285,16 @@ class DynamicCensusFiller:
                 first_col = col_map.get('first_name')
                 last_col = col_map.get('last_name')
 
-                name_parts = []
-                if first_col and pd.notna(row.get(first_col)):
-                    name_parts.append(str(row[first_col]).strip())
-                if last_col and pd.notna(row.get(last_col)):
-                    name_parts.append(str(row[last_col]).strip())
+                raw_full_name = ""
                 if f_col and pd.notna(row.get(f_col)):
-                    val = str(row[f_col]).strip()
-                    if val not in name_parts:
-                        name_parts.append(val)
-
-                raw_full_name = " ".join(name_parts).strip()
+                    raw_full_name = str(row[f_col]).strip()
+                else:
+                    name_parts = []
+                    if first_col and pd.notna(row.get(first_col)):
+                        name_parts.append(str(row[first_col]).strip())
+                    if last_col and pd.notna(row.get(last_col)):
+                        name_parts.append(str(row[last_col]).strip())
+                    raw_full_name = " ".join(name_parts).strip()
                 if not raw_full_name or not self.is_valid_employee_name(raw_full_name):
                     continue
 
