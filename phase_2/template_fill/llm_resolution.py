@@ -156,6 +156,7 @@ def run_llm_resolution(
 
     # Find columns
     plan_col, prem_col, disc_col, rel_col, cov_col = None, None, None, None, None
+    name_col, first_col, last_col = None, None, None
     for r in range(1, 40):
         for c in range(1, min(ws.max_column + 1, 60)):
             val = str(ws.cell(row=r, column=c).value or '').strip().lower()
@@ -164,6 +165,12 @@ def run_llm_resolution(
             if 'discrep' in val and not disc_col:                       disc_col = c
             if 'relation' in val and 'discrep' not in val and not rel_col: rel_col = c
             if ('coverage' in val or 'tier' in val) and not cov_col:     cov_col = c
+            if (('employee' in val and 'name' in val) or ('full' in val and 'name' in val)) and not name_col:
+                name_col = c
+            if 'first' in val and 'name' in val and not first_col:
+                first_col = c
+            if 'last' in val and 'name' in val and not last_col:
+                last_col = c
         if plan_col and prem_col and disc_col:
             break
 
@@ -301,12 +308,26 @@ def run_llm_resolution(
         target_invoice_cleaned = {clean_name_for_compare(n) for n in target_invoice_raw_names if n}
         target_invoice_compact  = {compact(n)               for n in target_invoice_raw_names if n}
         
+        def get_name_from_row(row_idx: int) -> str:
+            if name_col:
+                val = ws.cell(row=row_idx, column=name_col).value
+                return str(val).strip() if val else ""
+            if first_col and last_col:
+                f = str(ws.cell(row=row_idx, column=first_col).value or '').strip()
+                l = str(ws.cell(row=row_idx, column=last_col).value  or '').strip()
+                return f"{f} {l}".strip()
+            # fallback to columns 2 and 3 if split, or column 1 if full
+            f_val = str(ws.cell(row=row_idx, column=1).value or "").strip()
+            s_val = str(ws.cell(row=row_idx, column=2).value or "").strip()
+            t_val = str(ws.cell(row=row_idx, column=3).value or "").strip()
+            if (not f_val or f_val.isdigit()) and s_val and t_val:
+                return f"{s_val} {t_val}"
+            return f_val
+
         for row_idx in range(1, ws.max_row + 1):
             disc_val = str(ws.cell(row=row_idx, column=disc_col).value or "").strip().lower()
             if "not on census" in disc_val:
-                first = str(ws.cell(row=row_idx, column=2).value or "").strip()
-                last  = str(ws.cell(row=row_idx, column=3).value or "").strip()
-                appended_name = f"{first} {last}".strip()
+                appended_name = get_name_from_row(row_idx)
                 # Primary check: exact cleaned match
                 # Secondary check: compact (space-stripped) match handles
                 #   'Uessuguigomes' == 'Uessugui Gomes' and similar OCR/space issues
