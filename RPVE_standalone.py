@@ -466,16 +466,17 @@ def extract_text(pdf_path: Path, max_pages: int = 1000) -> str:
         
         with pdfplumber.open(str(pdf_path)) as pdf:
             with fitz.open(pdf_path) as doc:
-                pages_to_extract = min(max_pages, len(pdf.pages))
+                pages_to_extract = min(max_pages, len(doc))
                 for i in range(pages_to_extract):
                     page_text = ""
                     
                     # 1. Try pdfplumber (best for layout preservation)
                     try:
-                        plumber_page = pdf.pages[i]
-                        p_text = plumber_page.extract_text(layout=True) or ""
-                        if len(p_text.strip()) > 100 and any(kw in p_text.upper() for kw in VALID_KEYWORDS):
-                            page_text = p_text
+                        if i < len(pdf.pages):
+                            plumber_page = pdf.pages[i]
+                            p_text = plumber_page.extract_text(layout=True) or ""
+                            if len(p_text.strip()) > 100 and any(kw in p_text.upper() for kw in VALID_KEYWORDS):
+                                page_text = p_text
                     except Exception as e:
                         print(f"  [PAGE {i+1}] pdfplumber error: {e}")
 
