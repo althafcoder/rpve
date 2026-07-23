@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Download, FileJson, BarChart3, Building2, RotateCcw, HardHat, FileText, Table as TableIcon, Loader2, Brain, Copy, Merge } from "lucide-react";
+import { Download, FileJson, BarChart3, Building2, RotateCcw, HardHat, FileText, Table as TableIcon, Loader2, Brain, Copy, Merge, FileCheck, DollarSign } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { DocumentFile } from "@/types/extractor";
@@ -109,8 +109,70 @@ const ResultsPanel = ({
 
   const tableData = getTableData();
 
-  const handleDownloadJson = () => {
-    const blob = new Blob([JSON.stringify(result, null, 2)], { type: "application/json" });
+  const handleDownloadPhase1Json = () => {
+    if (!document.phase1Data) return;
+    const blob = new Blob([JSON.stringify(document.phase1Data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = globalThis.document.createElement("a");
+    a.href = url;
+    a.download = `${document.name.replace(".pdf", "")}_phase1_original.json`;
+    globalThis.document.body.appendChild(a);
+    a.click();
+    globalThis.document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleDownloadPhase1Excel = async () => {
+    if (!document.phase1ExcelPath) {
+      console.error("No Phase 1 Excel file path available");
+      return;
+    }
+
+    try {
+      const response = await fetch(`/RPVE/api/download/${document.phase1ExcelPath}`);
+      if (!response.ok) throw new Error("Download failed");
+
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const a = globalThis.document.createElement("a");
+      a.href = url;
+      a.download = document.phase1ExcelPath;
+      globalThis.document.body.appendChild(a);
+      a.click();
+      globalThis.document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error("Phase 1 Excel download error:", error);
+      toast.error("Phase 1 Excel download failed. Please try again.");
+    }
+  };
+
+  const handleDownloadJson = async () => {
+    // Try to download the Phase 1 RPVE extraction JSON file from backend
+    if (document.jsonPath) {
+      try {
+        const response = await fetch(`/RPVE/api/download/${document.jsonPath}`);
+        if (response.ok) {
+          const blob = await response.blob();
+          const url = URL.createObjectURL(blob);
+          const a = globalThis.document.createElement("a");
+          a.href = url;
+          a.download = document.jsonPath; // Use the actual filename from backend
+          globalThis.document.body.appendChild(a);
+          a.click();
+          globalThis.document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+          return; // Success, exit
+        }
+      } catch (error) {
+        console.error("JSON download from backend failed, falling back to in-memory data:", error);
+      }
+    }
+
+    // Fallback: Create JSON from in-memory result data
+    console.log("Using fallback: Creating JSON from in-memory result data");
+    const dataToDownload = result || [];
+    const blob = new Blob([JSON.stringify(dataToDownload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = globalThis.document.createElement("a");
     a.href = url;
@@ -224,7 +286,8 @@ const ResultsPanel = ({
   // Dynamic tab configuration
   const showSummary = isLossRun;
   const showMerge = hasMultipleDocs && isLossRun;
-  const tabCount = 2 + (showSummary ? 1 : 0) + (showMerge ? 1 : 0);
+  const showPhase1 = !!document.phase1Data; // Show Phase 1 tab if data exists
+  const tabCount = 2 + (showSummary ? 1 : 0) + (showMerge ? 1 : 0) + (showPhase1 ? 1 : 0);
 
   return (
     <div className="space-y-4 animate-slide-up">
@@ -367,10 +430,16 @@ const ResultsPanel = ({
 
       {/* View Switcher */}
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-        <TabsList className="grid w-full grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 max-w-[800px] mb-2">
+        <TabsList className={`grid w-full max-w-[800px] mb-2 ${showPhase1 ? 'grid-cols-2 sm:grid-cols-4' : 'grid-cols-2 sm:grid-cols-3 lg:grid-cols-4'}`}>
+          {showPhase1 && (
+            <TabsTrigger value="phase1" className="text-[10px] sm:text-xs flex items-center gap-2 font-semibold tracking-wide py-1.5 bg-blue-500/10 data-[state=active]:bg-blue-500 data-[state=active]:text-white">
+              <FileCheck className="w-3 h-3" />
+              PHASE 1
+            </TabsTrigger>
+          )}
           <TabsTrigger value="table" className="text-[10px] sm:text-xs flex items-center gap-2 font-semibold tracking-wide py-1.5">
             <TableIcon className="w-3 h-3" />
-            TABLE VIEW
+            {showPhase1 ? 'PHASE 2' : 'TABLE VIEW'}
           </TabsTrigger>
           <TabsTrigger value="json" className="text-[10px] sm:text-xs flex items-center gap-2 font-semibold tracking-wide py-1.5">
             <FileJson className="w-3 h-3" />
@@ -390,8 +459,76 @@ const ResultsPanel = ({
           )}
         </TabsList>
 
+        {showPhase1 && (
+          <TabsContent value="phase1" className="mt-0">
+            <div className="space-y-4">
+              {/* Phase 1 Header */}
+              <div className="p-4 rounded-lg bg-blue-500/10 border border-blue-500/30">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-2">
+                    <DollarSign className="w-5 h-5 text-blue-600" />
+                    <h3 className="text-sm font-bold text-blue-900">Phase 1 - Original Invoice Data (Pre-Deduction)</h3>
+                  </div>
+                  <span className="px-2 py-1 rounded-full bg-blue-500/20 text-blue-700 text-xs font-semibold">
+                    No Deductions
+                  </span>
+                </div>
+                <p className="text-xs text-blue-700/80">
+                  📄 {document.phase1Data?.metadata?.record_count || document.phase1Data?.employees?.length || 0} records • 
+                  Original amounts from invoice (no $250 deduction applied)
+                </p>
+              </div>
+
+              {/* Phase 1 Download Actions */}
+              <div className="flex flex-wrap gap-2">
+                <Button size="sm" onClick={handleDownloadPhase1Json} className="h-8 text-[11px] font-bold bg-blue-600 hover:bg-blue-700">
+                  <FileJson className="w-3.5 h-3.5 mr-1.5" />
+                  Download Phase 1 JSON
+                </Button>
+                <Button size="sm" variant="outline" onClick={handleDownloadPhase1Excel} disabled={!document.phase1ExcelPath} className="h-8 text-[11px] font-bold border-blue-500 text-blue-600 hover:bg-blue-50">
+                  <Download className="w-3.5 h-3.5 mr-1.5" />
+                  Download Phase 1 Excel
+                </Button>
+              </div>
+
+              {/* Phase 1 Data View */}
+              <Tabs defaultValue="table" className="w-full">
+                <TabsList className="grid w-full grid-cols-2 max-w-[400px] mb-2">
+                  <TabsTrigger value="table" className="text-xs">Table View</TabsTrigger>
+                  <TabsTrigger value="json" className="text-xs">JSON View</TabsTrigger>
+                </TabsList>
+
+                <TabsContent value="table" className="mt-0">
+                  <TableView 
+                    data={document.phase1Data?.employees || []} 
+                    title="Phase 1 - Original Member Data" 
+                    maxHeight="450px" 
+                  />
+                </TabsContent>
+
+                <TabsContent value="json" className="mt-0">
+                  <JsonViewer 
+                    data={document.phase1Data} 
+                    title="Phase 1 - Original Data (JSON)" 
+                    maxHeight="450px" 
+                  />
+                </TabsContent>
+              </Tabs>
+            </div>
+          </TabsContent>
+        )}
+
         <TabsContent value="table" className="mt-0">
-          <TableView data={tableData} title="Extracted Data Grid" maxHeight="450px" />
+          {showPhase1 && (
+            <div className="mb-3 p-3 rounded-lg bg-green-500/10 border border-green-500/30 flex items-center gap-2">
+              <FileCheck className="w-4 h-4 text-green-600" />
+              <div className="flex-1">
+                <p className="text-xs font-semibold text-green-900">Phase 2 - Adjusted Data (After Deductions)</p>
+                <p className="text-[10px] text-green-700/80">$250 deduction applied to financial amounts</p>
+              </div>
+            </div>
+          )}
+          <TableView data={tableData} title={showPhase1 ? "Phase 2 - Adjusted Data" : "Extracted Data Grid"} maxHeight="450px" />
         </TabsContent>
 
         <TabsContent value="json" className="mt-0">

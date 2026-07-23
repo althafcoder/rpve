@@ -198,6 +198,18 @@ export function useDocumentProcessor() {
                     work_comp_metadata: json.work_comp_metadata || null,
                 };
 
+                // Fetch Phase 1 baseline data if available
+                let phase1Data = null;
+                const phase1JsonPath = json.phase1_baseline_json;
+                if (phase1JsonPath) {
+                    try {
+                        const phase1Response = await fetch(`/RPVE/api/download/${phase1JsonPath}`);
+                        phase1Data = await phase1Response.json();
+                    } catch (e) {
+                        console.error("Failed to fetch Phase 1 data:", e);
+                    }
+                }
+
                 updateDoc(id, {
                     stage: "complete",
                     stageMessage: "✓ Extraction complete",
@@ -206,6 +218,11 @@ export function useDocumentProcessor() {
                     excelPath: json.output_file,
                     excelAbsPath: json.excel_path || null,
                     jsonPath: json.output_json,
+                    phase1JsonPath: json.phase1_baseline_json,
+                    phase1JsonUrl: json.phase1_baseline_json_url,
+                    phase1ExcelPath: json.phase1_baseline_excel,
+                    phase1ExcelUrl: json.phase1_baseline_excel_url,
+                    phase1Data: phase1Data,
                     completedAt: Date.now(),
                 });
             } catch (error) {

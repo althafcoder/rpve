@@ -78,4 +78,10 @@ export interface DocumentFile {
   excelPath?: string;    // Filename of Excel file (used in download URL)
   excelAbsPath?: string; // Full absolute path on server (used to skip rglob)
   jsonPath?: string;     // Path to JSON file from backend
+  // Phase 1 Baseline outputs (original amounts, no deductions)
+  phase1JsonPath?: string;
+  phase1JsonUrl?: string;
+  phase1ExcelPath?: string;
+  phase1ExcelUrl?: string;
+  phase1Data?: any;  // Phase 1 extracted data
 }

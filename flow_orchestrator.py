@@ -283,6 +283,10 @@ def run_job(
 
     logger.info("--- Starting End-to-End RPVE Flow (job_id=%s) ---", job_id)
 
+    # Initialize Phase 1 baseline variables at function scope
+    phase1_baseline_json = None
+    phase1_baseline_excel = None
+
     # ── PHASE 1: Extraction (or Bypass if Excel provided) ─────────────────────
     is_direct_excel = pdf_path.suffix.lower() in ['.xlsx', '.xls']
 
@@ -296,11 +300,13 @@ def run_job(
         else:
             phase1_output_excel = str(pdf_path)
             
-        # Mock result data for subsequent phases
+        # Mock result data for subsequent phases (no RPVE JSON in direct Excel mode)
         result_data = {
             "excel_path": phase1_output_excel,
             "json_path":  None,
             "text_path":  None,
+            "output_json": None,
+            "json_file":   None,
         }
         phase2_report_path    = work_dir / f"FINAL_AUDIT_REPORT_{job_id}.xlsx"
         validated_report_path = work_dir / f"VALIDATED_AUDIT_REPORT_{job_id}.xlsx"
@@ -315,6 +321,55 @@ def run_job(
 
             phase2_report_path    = work_dir / f"FINAL_AUDIT_REPORT_{job_id}.xlsx"
             validated_report_path = work_dir / f"VALIDATED_AUDIT_REPORT_{job_id}.xlsx"
+            
+            # ── PHASE 0.5: Generate Phase 1 Baseline using CACHED text ──────────
+            logger.info("[0.5] Generating Phase 1 Baseline with dedicated extraction...")
+            try:
+                # Check if text file was already created by RPVE extraction
+                text_path = result_data.get("text_path")
+                if not text_path:
+                    # Look for text file in work directory
+                    text_files = list(work_dir.glob("*.txt"))
+                    if text_files:
+                        text_path = str(text_files[0])
+                
+                extracted_text = None
+                if text_path and Path(text_path).exists():
+                    logger.info("    -> ✓ OPTIMIZATION: Reusing cached text from: %s", Path(text_path).name)
+                    with open(text_path, 'r', encoding='utf-8') as f:
+                        extracted_text = f.read()
+                    logger.info("    -> Loaded %d characters (skipping PDF re-extraction)", len(extracted_text))
+                
+                # Use dedicated Phase 1 extraction with cached text
+                from generate_phase1_output import generate_phase1_output_from_text
+                
+                if extracted_text:
+                    phase1_result = generate_phase1_output_from_text(
+                        text=extracted_text,
+                        output_dir=work_dir,
+                        base_filename=pdf_path.stem
+                    )
+                else:
+                    # Fallback: extract from PDF (slower)
+                    logger.warning("    -> ⚠ Text file not found, falling back to PDF extraction (slower)...")
+                    from generate_phase1_output import generate_phase1_output
+                    phase1_result = generate_phase1_output(
+                        pdf_path=pdf_path,
+                        output_dir=work_dir
+                    )
+                
+                phase1_baseline_json = phase1_result['json_path']
+                phase1_baseline_excel = phase1_result['excel_path']
+                
+                logger.info("    -> Phase 1 Baseline Success!")
+                logger.info("    -> JSON: %s", phase1_baseline_json.name)
+                logger.info("    -> Excel: %s", phase1_baseline_excel.name)
+                logger.info("    -> Records: %s (duplicates allowed)", phase1_result['record_count'])
+                    
+            except Exception as e:
+                import traceback
+                logger.warning("    [WARN] Phase 1 Baseline generation failed (non-fatal): %s", e)
+                logger.debug(traceback.format_exc())
 
         except Exception as e:
             import traceback
@@ -510,6 +565,10 @@ def run_job(
     phase2_report_name    = phase2_report_path.name
     validated_report_name = validated_report_path.name
     
+    # Preserve the original RPVE JSON path from Phase 1 for top JSON download button
+    phase1_rpve_json = result_data.get("json_path")
+    phase1_rpve_json_name = result_data.get("output_json") or result_data.get("json_file")
+    
     # Ensure mandatory fields for UI
     merged_result["status"]      = "success"
     merged_result["type"]        = "INVOICE"
@@ -520,11 +579,19 @@ def run_job(
     merged_result["final_report_path"] = str(final_report_path.absolute())
     merged_result["excel_path"]        = str(final_report_path.absolute())
 
-    # Use the audit JSON as the primary source for the UI table view
+    # Top JSON button should download the Phase 1 RPVE JSON (Oxford_Invoice_*_RPVE_*.json)
+    if phase1_rpve_json and Path(phase1_rpve_json).exists():
+        merged_result["output_json"] = phase1_rpve_json_name
+        merged_result["json_file"]   = phase1_rpve_json_name
+        merged_result["json_url"]    = f"/api/download/{phase1_rpve_json_name}"
+    elif not is_direct_excel:
+        # If Phase 1 ran but JSON is missing, log a warning
+        logger.warning("    [WARN] Phase 1 RPVE JSON not found. Top JSON download may not work.")
+    
+    # Keep audit JSON for UI table display (separate key)
     if audit_json.exists():
-        merged_result["output_json"] = audit_json.name
-        merged_result["json_file"]   = audit_json.name
-        merged_result["json_url"]    = f"/api/download/{audit_json.name}"
+        merged_result["audit_json"] = audit_json.name
+        merged_result["audit_json_url"] = f"/api/download/{audit_json.name}"
 
     merged_result["phase1_invoice_excel"]         = Path(phase1_output_excel).name
     merged_result["phase1_invoice_excel_url"]     = f"/api/download/{Path(phase1_output_excel).name}"
@@ -536,6 +603,14 @@ def run_job(
     if final_report_path != validated_report_path:
         merged_result["phase4_llm_census"]      = final_report_name
         merged_result["phase4_llm_census_url"]  = f"/api/download/{final_report_name}"
+    
+    # Add Phase 1 Baseline outputs to result if generated
+    if phase1_baseline_json and phase1_baseline_json.exists():
+        merged_result["phase1_baseline_json"] = phase1_baseline_json.name
+        merged_result["phase1_baseline_json_url"] = f"/api/download/{phase1_baseline_json.name}"
+    if phase1_baseline_excel and phase1_baseline_excel.exists():
+        merged_result["phase1_baseline_excel"] = phase1_baseline_excel.name
+        merged_result["phase1_baseline_excel_url"] = f"/api/download/{phase1_baseline_excel.name}"
 
     logger.info("--- Flow Completed Successfully! ---")
     logger.info("  Excel 1 — Invoice Extraction : %s", Path(phase1_output_excel).name)
