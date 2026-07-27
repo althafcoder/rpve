@@ -31,6 +31,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
+from typing import List
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -1481,6 +1482,67 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+from fastapi.openapi.utils import get_openapi
+
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    
+    openapi_schema = get_openapi(
+        title="RPVE - Benefit Invoice Extractor",
+        version="1.0.0",
+        routes=app.routes,
+    )
+    
+    # 1. Fix components/schemas
+    for component in openapi_schema.get("components", {}).get("schemas", {}).values():
+        properties = component.get("properties", {})
+        if not isinstance(properties, dict):
+            continue
+        for prop in properties.values():
+            if not isinstance(prop, dict):
+                continue
+            if prop.get("contentMediaType") == "application/octet-stream":
+                prop["format"] = "binary"
+                del prop["contentMediaType"]
+            # Array of files
+            if prop.get("type") == "array" and isinstance(prop.get("items"), dict):
+                items = prop["items"]
+                if items.get("contentMediaType") == "application/octet-stream":
+                    items["format"] = "binary"
+                    del items["contentMediaType"]
+
+    # 2. Fix request bodies in paths (inline schemas in newer FastAPI)
+    for path_data in openapi_schema.get("paths", {}).values():
+        for operation in path_data.values():
+            if not isinstance(operation, dict):
+                continue
+            request_body = operation.get("requestBody")
+            if not isinstance(request_body, dict):
+                continue
+            content = request_body.get("content", {})
+            form_data = content.get("multipart/form-data", {})
+            schema = form_data.get("schema", {})
+            properties = schema.get("properties", {})
+            if not isinstance(properties, dict):
+                continue
+            for prop in properties.values():
+                if not isinstance(prop, dict):
+                    continue
+                if prop.get("type") == "string" and prop.get("contentMediaType") == "application/octet-stream":
+                    prop["format"] = "binary"
+                    del prop["contentMediaType"]
+                elif prop.get("type") == "array" and isinstance(prop.get("items"), dict):
+                    items = prop["items"]
+                    if items.get("type") == "string" and items.get("contentMediaType") == "application/octet-stream":
+                        items["format"] = "binary"
+                        del items["contentMediaType"]
+
+    app.openapi_schema = openapi_schema
+    return openapi_schema
+
+app.openapi = custom_openapi
+
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 # ── Global file registry: filename → absolute path ───────────────────────────
@@ -1864,6 +1926,7 @@ def process_invoice_data_sync(file_path: Path, original_filename: str, out_dir: 
     return asyncio.run(process_invoice_data(file_path, original_filename, out_dir=out_dir))
 
 
+@app.post("/extract")
 @app.post("/api/extract")
 async def extract(file: UploadFile = File(...)):
     print(f"\n[RPVE] Extraction Mode -> Standard")
@@ -1887,8 +1950,9 @@ async def extract(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(500, str(e))
 
+@app.post("/process-flow")
 @app.post("/api/process-flow")
-async def process_flow(files: list[UploadFile] = File(...)):
+async def process_flow(files: List[UploadFile] = File(...)):
     """
     Async, non-blocking implementation of the full RPVE pipeline.
 
@@ -1964,7 +2028,14 @@ async def process_flow(files: list[UploadFile] = File(...)):
         if meta.status == "completed":
             # Deserialise the rich result JSON that run_job() stored
             if meta.result_json:
-                return json.loads(meta.result_json)
+                res_data = json.loads(meta.result_json)
+                try:
+                    from database import poc_db
+                    poc_db.log_rpve_run(job_id, ", ".join([f.filename for f in files]), "SUCCESS", str(res_data.get("insurer", "")), str(res_data.get("total_value", "")))
+                    print(f"[DB] Logged RPVE flow run for job {job_id[:8]} to converter.db", flush=True)
+                except Exception as db_err:
+                    print(f"[WARN] Failed to log RPVE flow run to DB: {db_err}", flush=True)
+                return res_data
             raise HTTPException(500, "Job completed but result_json is empty")
 
         if meta.status == "failed":

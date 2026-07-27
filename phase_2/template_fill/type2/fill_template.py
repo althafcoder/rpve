@@ -480,7 +480,29 @@ class DynamicCensusFiller:
         """Fill plan, premium and discrepancy columns in the census template."""
         try:
             wb = load_workbook(template_path)
-            ws = next((wb[s] for s in wb.sheetnames if any(k in s.lower() for k in ('census', 'table', 'employee'))), wb.active)
+
+            # Guard: some Excel files (macro-enabled, corrupted) open with 0 sheets.
+            if not wb.sheetnames:
+                logger.error(
+                    f"Workbook has no sheets — file may be macro-enabled (.xlsm/.xltm), "
+                    f"password-protected, or corrupted: {template_path}"
+                )
+                return False
+
+            ws = next(
+                (wb[s] for s in wb.sheetnames
+                 if any(k in s.lower() for k in ('census', 'table', 'employee'))),
+                wb.active,
+            )
+
+            # wb.active can still be None if the sheet is hidden / chart-only
+            if ws is None:
+                logger.error(
+                    f"Could not find a usable worksheet in: {template_path} "
+                    f"(sheets: {wb.sheetnames})"
+                )
+                return False
+
             if not self._detect_census_structure(ws): return False
 
             filled_count = not_found_count = 0

@@ -101,24 +101,27 @@ def classify_excel_template(excel_path: Path) -> str:
             warnings.simplefilter("ignore")
             df = pd.read_excel(excel_path, nrows=25, header=None)
         all_text = " ".join([str(val).lower() for val in df.values.flatten() if pd.notna(val)])
-        
+
         # Type 1 Detection (Engage/Kaiser)
         if "ee row" in all_text or "relation-ship to employee" in all_text or "kaiser networks" in all_text:
             return "type1"
-            
+
         # Type 3 Detection (RAPT Blue Headers)
         if "data row" in all_text or "cobra participant" in all_text or "discrepancies" in all_text:
             return "type3"
-            
+
         # Type 2 (Basic Titan Intake / Generic Census)
-        elif "first name" in all_text or "last name" in all_text or "name" in all_text:
+        if "first name" in all_text or "last name" in all_text or "name" in all_text:
             return "type2"
 
         # Default fallback to type2 (dynamic column header mapping)
         return "type2"
     except Exception as e:
-        print(f"Error reading Excel: {e}")
-        return "type2"
+        # If the file cannot be parsed at all (e.g. 0 worksheets, macro-only,
+        # password-protected), signal that to the caller so it can surface a
+        # clear user-facing error instead of crashing inside a filler.
+        print(f"Error reading Excel (classify_excel_template): {e}")
+        return "unreadable"
 
 
 def is_likely_source_invoice(excel_path: Path) -> bool:
@@ -479,6 +482,14 @@ def run_job(
             script = phase2_base / "type3" / "fill_template.py"
             mod = load_phase_module("filler_type3", script)
             mod.fill_rapt_template(phase1_output_excel, ref_census_path, template_path, str(phase2_report_path))
+
+        elif template_type == "unreadable":
+            raise ValueError(
+                "The census template file could not be read by the system. "
+                "This usually means it is a macro-enabled workbook (.xlsm/.xltm), "
+                "password-protected, or corrupted. "
+                "Please save a copy as a plain .xlsx file and try again."
+            )
 
         else:
             raise ValueError(f"Could not identify Excel template type: {template_type}")
