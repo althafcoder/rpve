@@ -31,6 +31,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
+from typing import List
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -169,6 +170,16 @@ if POPPLER_PATH and os.path.exists(POPPLER_PATH):
     if POPPLER_PATH not in os.environ["PATH"]:
         os.environ["PATH"] += os.pathsep + POPPLER_PATH
     print(f"[RPVE] Poppler path added to PATH: {POPPLER_PATH}")
+
+import pytesseract
+TESSERACT_PATH = os.getenv("TESSERACT_PATH")
+if TESSERACT_PATH and os.path.exists(TESSERACT_PATH):
+    if TESSERACT_PATH not in os.environ["PATH"]:
+        os.environ["PATH"] += os.pathsep + TESSERACT_PATH
+    tesseract_exe = os.path.join(TESSERACT_PATH, "tesseract.exe")
+    if os.path.exists(tesseract_exe):
+        pytesseract.pytesseract.tesseract_cmd = tesseract_exe
+    print(f"[RPVE] Tesseract path added to PATH: {TESSERACT_PATH}")
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -454,7 +465,7 @@ def extract_text(pdf_path: Path, max_pages: int = 1000) -> str:
     # Keywords we EXPECT to find in a valid RPVE document page
     VALID_KEYWORDS = [
         "TOTALSOURCE", "PAYCHEX", "AETNA", "KAISER", "UNITEDHEALTHCARE", "INVOICE", "BILLING", 
-        "PREMIUM", "AMOUNT DUE", "PAGE", "EMPLOYEE", "MEMBERS", "CURRENT DETAIL", 
+        "PREMIUM", "AMOUNT DUE", "EMPLOYEE", "MEMBERS", "CURRENT DETAIL", 
         "RETRO DETAIL", "ADJUSTMENT DETAIL", "MEDICA", "ADP", "BLUE CROSS", "CIGNA", "GUARDIAN"
     ]
 
@@ -1888,7 +1899,7 @@ async def extract(file: UploadFile = File(...)):
         raise HTTPException(500, str(e))
 
 @app.post("/api/process-flow")
-async def process_flow(files: list[UploadFile] = File(...)):
+async def process_flow(files: List[UploadFile] = File(...)):
     """
     Async, non-blocking implementation of the full RPVE pipeline.
 
@@ -1973,6 +1984,30 @@ async def process_flow(files: list[UploadFile] = File(...)):
     # Timeout — mark as failed and return error
     job_store.update_status(job_id, "failed", error="Timed out after 10 minutes")
     raise HTTPException(504, "Processing timed out. Please try again.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# POWER AUTOMATE DESKTOP — BATCH EXTRACTION ENDPOINT
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.post(
+    "/api/v1/batch/process",
+    tags=["Automation"],
+    summary="Power Automate Batch Process",
+    description=(
+        "Full RPVE Pipeline for PAD. Upload a source PDF invoice and a blank Excel template "
+        "via multipart/form-data. This endpoint runs the full 4-phase pipeline and returns "
+        "the final JSON containing the filled Excel download URL (`excel_url`)."
+    ),
+)
+async def power_automate_batch_process(files: List[UploadFile] = File(...)):
+    """
+    PAD-compatible endpoint that runs the FULL 4-phase RPVE pipeline.
+    
+    Expects at least two files (e.g. 1 PDF invoice + 1 Excel template).
+    Returns a single JSON response containing 'excel_url' for the filled output.
+    """
+    return await process_flow(files)
 
 
 @app.get("/api/download/{filename}", include_in_schema=False)
