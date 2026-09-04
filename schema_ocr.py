@@ -95,25 +95,114 @@ class SchemaOCRExtractor:
             raise
 
         try:
-            # 1. Load model (DBNet + CRNN)
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-            print(f"[Rostaing OCR] Loading predictor onto device: {device}...", flush=True)
-            model = ocr_predictor(det_arch='db_resnet50', reco_arch='crnn_vgg16_bn', pretrained=True)
-            if torch.cuda.is_available():
-                model.cuda()
+            # 1. Device Detection & Selection with Fallback
+            device = None
+            use_gpu = False
+            
+            # Check environment variable for forced CPU mode
+            force_cpu = os.getenv("RPVE_FORCE_CPU", "false").lower() == "true"
+            
+            if force_cpu:
+                device = torch.device("cpu")
+                print(f"[Rostaing OCR] ⚙️ Forced CPU mode (RPVE_FORCE_CPU=true)", flush=True)
+            elif torch.cuda.is_available():
+                try:
+                    # Try to initialize GPU
+                    device = torch.device("cuda")
+                    print(f"[Rostaing OCR] 🚀 GPU detected: {torch.cuda.get_device_name(0)}", flush=True)
+                    print(f"[Rostaing OCR] GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB", flush=True)
+                    
+                    # Test GPU with a small operation
+                    test_tensor = torch.zeros(1).to(device)
+                    del test_tensor
+                    torch.cuda.empty_cache()
+                    
+                    use_gpu = True
+                    print(f"[Rostaing OCR] ✅ GPU initialization successful!", flush=True)
+                    
+                except (RuntimeError, torch.cuda.OutOfMemoryError, AssertionError) as gpu_err:
+                    print(f"[Rostaing OCR] ⚠️ GPU initialization failed: {gpu_err}", flush=True)
+                    print(f"[Rostaing OCR] 🔄 Falling back to CPU...", flush=True)
+                    device = torch.device("cpu")
+                    use_gpu = False
+            else:
+                device = torch.device("cpu")
+                print(f"[Rostaing OCR] 💻 No GPU detected. Using CPU.", flush=True)
+            
+            # 2. Load model with device fallback
+            try:
+                print(f"[Rostaing OCR] Loading predictor onto {device}...", flush=True)
+                model = ocr_predictor(det_arch='db_resnet50', reco_arch='crnn_vgg16_bn', pretrained=True)
+                model = model.to(device)
+                print(f"[Rostaing OCR] ✅ Model loaded successfully on {device}!", flush=True)
+                
+            except (RuntimeError, torch.cuda.OutOfMemoryError) as model_err:
+                if use_gpu:
+                    print(f"[Rostaing OCR] ⚠️ Model loading failed on GPU: {model_err}", flush=True)
+                    print(f"[Rostaing OCR] 🔄 Retrying on CPU...", flush=True)
+                    device = torch.device("cpu")
+                    use_gpu = False
+                    torch.cuda.empty_cache()
+                    model = ocr_predictor(det_arch='db_resnet50', reco_arch='crnn_vgg16_bn', pretrained=True)
+                    model = model.to(device)
+                    print(f"[Rostaing OCR] ✅ Model loaded on CPU!", flush=True)
+                else:
+                    raise
 
-            # 2. Render PDF pages to images
+            # 3. Render PDF pages to images
             doc_fitz = fitz.open(self.pdf_path)
             mat = fitz.Matrix(2, 2)  # High resolution zoom
             full_text_pages = []
+            
+            gpu_page_count = 0
+            cpu_page_count = 0
 
             for page_idx, page in enumerate(doc_fitz):
-                print(f"[Rostaing OCR] Processing Page {page_idx + 1}/{len(doc_fitz)}...", flush=True)
-                pix = page.get_pixmap(matrix=mat, alpha=False)
-                img_bytes = pix.tobytes("png")
+                page_device = device  # Start with default device
                 
-                doc = DocumentFile.from_images(img_bytes)
-                result = model(doc)
+                try:
+                    print(f"[Rostaing OCR] Processing Page {page_idx + 1}/{len(doc_fitz)} on {device}...", flush=True)
+                    pix = page.get_pixmap(matrix=mat, alpha=False)
+                    img_bytes = pix.tobytes("png")
+                    
+                    doc = DocumentFile.from_images(img_bytes)
+                    
+                    # Try processing on current device
+                    with torch.no_grad():  # Disable gradients for inference
+                        result = model(doc)
+                    
+                    if use_gpu:
+                        gpu_page_count += 1
+                    else:
+                        cpu_page_count += 1
+                        
+                except torch.cuda.OutOfMemoryError as oom_err:
+                    # GPU OOM on this specific page - fallback to CPU temporarily
+                    print(f"[Rostaing OCR] ⚠️ GPU OOM on page {page_idx + 1}. Processing on CPU...", flush=True)
+                    
+                    # Clear GPU cache
+                    torch.cuda.empty_cache()
+                    
+                    # Move model to CPU temporarily
+                    model = model.cpu()
+                    page_device = torch.device("cpu")
+                    
+                    # Retry on CPU
+                    with torch.no_grad():
+                        result = model(doc)
+                    
+                    cpu_page_count += 1
+                    
+                    # Try to move model back to GPU for next page
+                    if use_gpu:
+                        try:
+                            model = model.to(device)
+                            print(f"[Rostaing OCR] 🔄 Model moved back to GPU for next page.", flush=True)
+                        except:
+                            # If we can't move back, stay on CPU
+                            print(f"[Rostaing OCR] ⚠️ Cannot move back to GPU. Continuing on CPU.", flush=True)
+                            device = torch.device("cpu")
+                            use_gpu = False
                 doctr_page = result.pages[0]
 
                 # Flatten all words from the page blocks
@@ -190,8 +279,14 @@ class SchemaOCRExtractor:
                 full_text_pages.append(f"--- Page {page_idx + 1} ---\n{page_text}")
 
             doc_fitz.close()
+            
+            # Clear GPU cache if used
+            if use_gpu and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
             self.output_text = "\n\n".join(full_text_pages)
             print(f"[Rostaing OCR] Finished extracting. Text length: {len(self.output_text)} characters.")
+            print(f"[Rostaing OCR] 📊 Processing Summary: {gpu_page_count} pages on GPU, {cpu_page_count} pages on CPU", flush=True)
 
             # Save the raw text to verify the table/column layout was preserved correctly
             if save_debug_output and self.output_text:
