@@ -161,6 +161,19 @@ def _detect_invoice_columns_llm(df: pd.DataFrame) -> dict:
             temperature=0.0
         )
         mapping = json.loads(response.choices[0].message.content)
+        
+        try:
+            from core.universal_token_monitor import track_usage
+            track_usage(
+                response_usage=response.usage,
+                model="gpt-4o",
+                poc_name="RPVE_PHASE2",
+                file_name="invoice_column_mapping",
+                step_name="detect_invoice_columns"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to log token usage: {e}")
+
         valid_mapping = {k: v for k, v in mapping.items() if v in headers}
         logger.info(f"LLM Dynamic Invoice Mapping: {valid_mapping}")
         return valid_mapping

@@ -370,6 +370,19 @@ class SchemaOCRExtractor:
                 response_format={"type": "json_object"},
                 temperature=0.0
             )
+            
+            try:
+                from core.universal_token_monitor import track_usage
+                track_usage(
+                    response_usage=response.usage,
+                    model="gpt-4o-mini",
+                    poc_name="RPVE",
+                    file_name=self.pdf_path.split('/')[-1] if hasattr(self, 'pdf_path') else 'unknown.pdf',
+                    step_name="schema_ocr"
+                )
+            except Exception as e:
+                print(f"  [LLM] Failed to log token usage: {e}")
+                
             data = json.loads(response.choices[0].message.content)
             print("[Rostaing OCR] Schema mapping completed successfully.")
             return data

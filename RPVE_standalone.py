@@ -1089,6 +1089,18 @@ PDF TEXT: {text}
                 response_format={"type": "json_object"},
             )
             raw = response.choices[0].message.content
+            
+            try:
+                from core.universal_token_monitor import track_usage
+                track_usage(
+                    response_usage=response.usage,
+                    model="gpt-4o",
+                    poc_name="RPVE",
+                    file_name="RPVE_Extraction",
+                    step_name="invoice_chunk_extraction"
+                )
+            except Exception as e:
+                print(f"    [RPVE] Failed to log token usage: {e}")
 
             # Strategy 1: Direct parsing
             try:
