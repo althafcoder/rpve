@@ -32,7 +32,7 @@ from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
 from typing import List
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -42,6 +42,16 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 load_dotenv()
+
+# Add workspace root to sys.path for database module
+_workspace_root = str(Path(__file__).parent.parent.parent.resolve())
+if _workspace_root not in sys.path:
+    sys.path.insert(0, _workspace_root)
+
+try:
+    from database.poc_db import log_universal as _log_uni
+except ImportError:
+    _log_uni = None
 
 BASE_DIR   = Path(__file__).parent
 UPLOAD_DIR = BASE_DIR / "rpve_uploads"
@@ -1888,7 +1898,7 @@ def process_invoice_data_sync(file_path: Path, original_filename: str, out_dir: 
 
 
 @app.post("/api/extract")
-async def extract(file: UploadFile = File(...)):
+async def extract(request: Request, file: UploadFile = File(...)):
     print(f"\n[RPVE] Extraction Mode -> Standard")
     if not file.filename:
         raise HTTPException(400, "No filename provided")
@@ -1906,12 +1916,42 @@ async def extract(file: UploadFile = File(...)):
         shutil.copyfileobj(file.file, f)
     
     try:
-        return await process_invoice_data(file_path, file.filename)
+        processed_by = request.headers.get("X-User-Email") or request.headers.get("x-user-email") or "SYSTEM"
+        
+        if _log_uni:
+            _log_uni(
+                module="RPVE (Benefit Invoice Extractor)", action="extract",
+                status="STARTED",
+                processed_by=processed_by,
+                file_name=file.filename,
+                details="Starting RPVE extraction"
+            )
+            
+        result = await process_invoice_data(file_path, file.filename)
+        
+        if _log_uni:
+            _log_uni(
+                module="RPVE (Benefit Invoice Extractor)", action="extract",
+                status="SUCCESS",
+                processed_by=processed_by,
+                file_name=file.filename,
+                details="RPVE extraction completed successfully"
+            )
+            
+        return result
     except Exception as e:
+        if _log_uni:
+            _log_uni(
+                module="RPVE (Benefit Invoice Extractor)", action="extract",
+                status="FAILED",
+                processed_by=processed_by,
+                file_name=file.filename,
+                details=f"Error: {str(e)[:100]}"
+            )
         raise HTTPException(500, str(e))
 
 @app.post("/api/process-flow")
-async def process_flow(files: List[UploadFile] = File(...)):
+async def process_flow(request: Request, files: List[UploadFile] = File(...)):
     """
     Async, non-blocking implementation of the full RPVE pipeline.
 
@@ -1969,6 +2009,17 @@ async def process_flow(files: List[UploadFile] = File(...)):
     job_store.create_job(job_id)
     job_worker.enqueue_job(job_id)
     print(f"[RPVE] Job {job_id[:8]}... enqueued.")
+    
+    processed_by = request.headers.get("X-User-Email") or request.headers.get("x-user-email") or "SYSTEM"
+    
+    if _log_uni:
+        _log_uni(
+            module="RPVE (Benefit Invoice Extractor)", action="extract",
+            status="STARTED",
+            processed_by=processed_by,
+            file_name=files[0].filename if files else "batch_job",
+            details="Starting RPVE Process Flow"
+        )
 
     # ── 4. Long-poll: wait for the job to complete (non-blocking) ─────────────
     # The event loop is free to serve other requests while we sleep.
@@ -1987,14 +2038,39 @@ async def process_flow(files: List[UploadFile] = File(...)):
         if meta.status == "completed":
             # Deserialise the rich result JSON that run_job() stored
             if meta.result_json:
+                if _log_uni:
+                    _log_uni(
+                        module="RPVE (Benefit Invoice Extractor)", action="extract",
+                        status="SUCCESS",
+                        processed_by=processed_by,
+                        file_name=files[0].filename if files else "batch_job",
+                        details="RPVE Process Flow completed successfully"
+                    )
                 return json.loads(meta.result_json)
             raise HTTPException(500, "Job completed but result_json is empty")
 
         if meta.status == "failed":
+            if _log_uni:
+                _log_uni(
+                    module="RPVE (Benefit Invoice Extractor)", action="extract",
+                    status="FAILED",
+                    processed_by=processed_by,
+                    file_name=files[0].filename if files else "batch_job",
+                    details=f"Error: {meta.error or 'unknown error'}"
+                )
             raise HTTPException(500, f"Processing failed: {meta.error or 'unknown error'}")
 
     # Timeout — mark as failed and return error
     job_store.update_status(job_id, "failed", error="Timed out after 10 minutes")
+    
+    if _log_uni:
+        _log_uni(
+            module="RPVE (Benefit Invoice Extractor)", action="extract",
+            status="FAILED",
+            processed_by=processed_by,
+            file_name=files[0].filename if files else "batch_job",
+            details="Timed out after 20 minutes"
+        )
     raise HTTPException(504, "Processing timed out. Please try again.")
 
 
