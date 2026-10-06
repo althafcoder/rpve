@@ -15,8 +15,17 @@ from pathlib import Path
 import os
 import json
 import re
-from openai import OpenAI
 from dotenv import load_dotenv
+import sys
+import time
+
+try:
+    import core_gpu
+except ImportError:
+    _root_dir = Path(__file__).resolve().parent.parent
+    if str(_root_dir) not in sys.path:
+        sys.path.insert(0, str(_root_dir))
+    import core_gpu
 
 try:
     import rostaing_ocr
@@ -168,13 +177,23 @@ class SchemaOCRExtractor:
                     doc = DocumentFile.from_images(img_bytes)
                     
                     # Try processing on current device
+                    t0_page = time.time()
                     with torch.no_grad():  # Disable gradients for inference
                         result = model(doc)
-                    
+                    page_elapsed = time.time() - t0_page
+
                     if use_gpu:
                         gpu_page_count += 1
                     else:
                         cpu_page_count += 1
+
+                    core_gpu.log_ocr_audit(
+                        module_name="RPVE",
+                        engine_name="DocTR/rostaing-ocr",
+                        page_idx=page_idx + 1,
+                        total_pages=len(doc_fitz),
+                        elapsed_sec=page_elapsed,
+                    )
                         
                 except torch.cuda.OutOfMemoryError as oom_err:
                     # GPU OOM on this specific page - fallback to CPU temporarily
